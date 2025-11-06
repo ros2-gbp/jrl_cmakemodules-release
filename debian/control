@@ -1,0 +1,12 @@
+Source: ros-jazzy-jrl-cmakemodules
+Section: misc
+Priority: optional
+Maintainer: Guilhem Saurel <guilhem.saurel@laas.fr>
+Build-Depends: debhelper (>= 9.0.0), cmake, doxygen, pkg-config, ros-jazzy-ros-workspace
+Homepage: https://github.com/jrl-umi3218/jrl-cmakemodules
+Standards-Version: 3.9.2
+
+Package: ros-jazzy-jrl-cmakemodules
+Architecture: all
+Depends: ${shlibs:Depends}, ${misc:Depends}, doxygen, pkg-config, ros-jazzy-ros-workspace
+Description: CMake utility toolbox
