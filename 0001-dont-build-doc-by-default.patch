@@ -1,0 +1,26 @@
+From 92573fbc3822e55141cfafc9e0c37876cd6783e4 Mon Sep 17 00:00:00 2001
+From: Guilhem Saurel <guilhem.saurel@laas.fr>
+Date: Thu, 6 Nov 2025 16:50:49 +0100
+Subject: [PATCH] dont build doc by default
+
+to fix PAL things
+---
+ post-project.cmake | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/post-project.cmake b/post-project.cmake
+index fb0a46a..08b22cd 100644
+--- a/post-project.cmake
++++ b/post-project.cmake
+@@ -39,7 +39,7 @@ else(${ARGC})
+   set(CMAKE_VERBOSE_MAKEFILE TRUE)
+ endif(${ARGC})
+ 
+-option(BUILD_DOCUMENTATION "Build the documentation." ON)
++option(BUILD_DOCUMENTATION "Build the documentation." OFF)
+ cmake_dependent_option(
+   INSTALL_DOCUMENTATION
+   "Install the documentation."
+-- 
+2.51.0
+
