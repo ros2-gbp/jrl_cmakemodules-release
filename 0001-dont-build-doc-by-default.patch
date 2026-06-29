@@ -1,4 +1,4 @@
-From b17c99fa8de2c68bf19342566ef55c89ea62c768 Mon Sep 17 00:00:00 2001
+From 5c5801fc0304b0116fe8e4e4701429b82ee89a51 Mon Sep 17 00:00:00 2001
 From: Guilhem Saurel <guilhem.saurel@laas.fr>
 Date: Thu, 6 Nov 2025 16:50:49 +0100
 Subject: [PATCH] dont build doc by default
@@ -9,7 +9,7 @@ to fix PAL things
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/post-project.cmake b/post-project.cmake
-index fb0a46a..08b22cd 100644
+index fb0a46abc6..08b22cd30a 100644
 --- a/post-project.cmake
 +++ b/post-project.cmake
 @@ -39,7 +39,7 @@ else(${ARGC})
@@ -22,5 +22,5 @@ index fb0a46a..08b22cd 100644
    INSTALL_DOCUMENTATION
    "Install the documentation."
 -- 
-2.51.0
+2.54.0
 
