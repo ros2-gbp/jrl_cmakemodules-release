@@ -39,7 +39,7 @@ else(${ARGC})
   set(CMAKE_VERBOSE_MAKEFILE TRUE)
 endif(${ARGC})
 
-option(BUILD_DOCUMENTATION "Build the documentation." OFF)
+option(BUILD_DOCUMENTATION "Build the documentation." ON)
 cmake_dependent_option(
   INSTALL_DOCUMENTATION
   "Install the documentation."
