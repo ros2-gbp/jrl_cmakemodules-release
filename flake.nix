@@ -1,59 +1,37 @@
 {
   description = "CMake utility toolbox";
 
-  inputs = {
-    flake-parts.url = "github:hercules-ci/flake-parts";
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  };
+  inputs.gepetto.url = "github:gepetto/nix";
 
   outputs =
     inputs:
-    inputs.flake-parts.lib.mkFlake { inherit inputs; } {
-      systems = inputs.nixpkgs.lib.systems.flakeExposed;
-      perSystem =
-        { pkgs, self', ... }:
-        {
-          packages = {
-            default = self'.packages.jrl-cmakemodules;
-            jrl-cmakemodules = pkgs.jrl-cmakemodules.overrideAttrs (super: {
-              src = pkgs.lib.fileset.toSource {
-                root = ./.;
-                fileset = pkgs.lib.fileset.gitTracked ./.;
-              };
-
-              # TODO: remove all this once it is in nixpkgs
-              patches = [ ];
-              postPatch = ''
-                patchShebangs _unittests/run_unit_tests.sh
-              '';
-
-              outputs = [
-                "out"
-                "doc"
-              ];
-              nativeBuildInputs = super.nativeBuildInputs ++ [
-                pkgs.sphinxHook
-              ];
-              sphinxRoot = "../.docs";
-
-              doCheck = true;
-              checkInputs = [
-                pkgs.python3
-              ];
-              checkPhase = ''
-                runHook preCheck
-
-                pushd ../_unittests
-                ./run_unit_tests.sh
-                cmake -P test_pkg-config.cmake
-
-                rm -rf build install
-                popd
-
-                runHook postCheck
-              '';
-            });
+    inputs.gepetto.lib.mkFlakoboros inputs (
+      { lib, ... }:
+      {
+        overrideAttrs.jrl-cmakemodules =
+          { pkgs-final, ... }:
+          {
+            patches = [ ];
+            cmakeFlags = [
+              (lib.cmakeBool "JRL_CMAKEMODULES_GENERATE_API_DOC" true)
+              (lib.cmakeBool "JRL_CMAKEMODULES_BUILD_TESTS" true)
+            ];
+            doCheck = true;
+            checkInputs = [
+              pkgs-final.catch2_3
+              pkgs-final.matio
+              pkgs-final.python3Packages.boost
+              pkgs-final.python3Packages.nanobind
+              pkgs-final.python3Packages.numpy
+              pkgs-final.python3Packages.pytest
+              pkgs-final.simde
+              pkgs-final.suitesparse
+            ];
+            src = lib.fileset.toSource {
+              root = ./.;
+              fileset = lib.fileset.gitTracked ./.;
+            };
           };
-        };
-    };
+      }
+    );
 }
