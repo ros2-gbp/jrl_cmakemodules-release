@@ -494,6 +494,7 @@ macro(_SETUP_DOXYGEN_DEFAULT_OPTIONS)
   # ---------------------------------------------------------------------------
   # Configuration options related to the XML output
   # ---------------------------------------------------------------------------
+  _set_if_undefined(DOXYGEN_XML_OUTPUT doxygen-xml)
 
   # ---------------------------------------------------------------------------
   # Configuration options related to the DOCBOOK output
@@ -588,7 +589,7 @@ macro(_SETUP_PROJECT_DOCUMENTATION)
       if(INSTALL_DOCUMENTATION)
         install(
           CODE
-            "EXECUTE_PROCESS(COMMAND ${CMAKE_MAKE_PROGRAM} ${PROJECT_NAME}-doc)"
+            "EXECUTE_PROCESS(COMMAND ${CMAKE_MAKE_PROGRAM} ${PROJECT_NAME}-doc WORKING_DIRECTORY ${PROJECT_BINARY_DIR})"
         )
       endif(INSTALL_DOCUMENTATION)
     endif(MSVC)
@@ -650,11 +651,17 @@ macro(_SETUP_PROJECT_DOCUMENTATION)
           DESTINATION ${CMAKE_INSTALL_FULL_DOCDIR}/doxygen-html
         )
       endif(EXISTS ${PROJECT_SOURCE_DIR}/doc/pictures)
+      # If DOXYGEN_GENERATE_XML option is set to YES", install doxygen-xml directory
+      if(DOXYGEN_GENERATE_XML STREQUAL "YES")
+        install(
+          DIRECTORY ${PROJECT_BINARY_DIR}/doc/${DOXYGEN_XML_OUTPUT}
+          DESTINATION ${CMAKE_INSTALL_FULL_DOCDIR}
+        )
+      endif()
     endif(INSTALL_DOCUMENTATION)
 
     list(
-      APPEND
-      LOGGING_WATCHED_VARIABLES
+      APPEND LOGGING_WATCHED_VARIABLES
       DOXYGEN_SKIP_DOT
       DOXYGEN_EXECUTABLE
       DOXYGEN_FOUND
@@ -682,8 +689,7 @@ macro(_DOXYTAG_ENTRIES_FROM_CMAKE_DEPENDENCIES DEPENDENCIES VAR_OUT)
     )
       get_filename_component(DEP_DOCDIR "${${PREFIX}_DOXYGENDOCDIR}" ABSOLUTE)
       list(
-        APPEND
-        ${VAR_OUT}
+        APPEND ${VAR_OUT}
         "\"${${PREFIX}_DOXYGENDOCDIR}/${PREFIX}.doxytag = ${DEP_DOCDIR}\""
       )
     endif()
@@ -748,8 +754,7 @@ macro(_SETUP_PROJECT_DOCUMENTATION_FINALIZE)
             ABSOLUTE
           )
           list(
-            APPEND
-            _TAGFILES_FROM_DEPENDENCIES
+            APPEND _TAGFILES_FROM_DEPENDENCIES
             "\"${${PREFIX}_DOXYGENDOCDIR}/${LIBRARY_NAME}.doxytag = ${DEP_DOCDIR}\""
           )
         endif()
@@ -763,8 +768,7 @@ macro(_SETUP_PROJECT_DOCUMENTATION_FINALIZE)
         # convert comma-separated list to space-separated list string.
         list(REMOVE_DUPLICATES _TAGFILES_FROM_DEPENDENCIES)
         string(
-          REPLACE
-          ";"
+          REPLACE ";"
           " "
           DOXYGEN_TAGFILES_FROM_DEPENDENCIES
           "${_TAGFILES_FROM_DEPENDENCIES}"
