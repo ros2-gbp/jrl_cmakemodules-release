@@ -99,6 +99,19 @@ name = "test-workspace"
 
 
 @pytest.fixture
+def sample_conanfile_py(tmp_path):
+    """Create a sample conanfile.py file."""
+    content = """class Pkg:
+    name = "test-pkg"
+    version = "1.2.3"
+    # other content
+"""
+    file_path = tmp_path / "conanfile.py"
+    file_path.write_text(content, encoding="utf-8")
+    return file_path
+
+
+@pytest.fixture
 def sample_citation_cff(tmp_path):
     """Create a sample CITATION.cff file."""
     content = """cff-version: 1.2.0
@@ -138,8 +151,17 @@ All notable changes to this project will be documented in this file.
 
 ## [1.0.0] - 2024-01-15
 
+### Fixed
+- Added links in changelog
+
+## [0.1.0] - 2024-01-14
+
 ### Added
 - Initial release
+
+[Unreleased]: https://github.com/example/project/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/example/project/compare/v0.1.0...v1.0.0
+[0.1.0]: https://github.com/example/project/releases/tag/v0.1.0
 """
     file_path = tmp_path / "CHANGELOG.md"
     file_path.write_text(content, encoding="utf-8")
@@ -183,6 +205,66 @@ def project_dir(
 ):
     """Create a complete project directory with all version files."""
     # Files are already created in tmp_path by the fixtures
+    return tmp_path
+
+
+@pytest.fixture
+def meta_package_dir(tmp_path):
+    """Create a meta-package repository: root aggregator + nested ROS packages."""
+    changelog_content = """# Changelog
+
+## [Unreleased]
+
+## [1.0.0] - 2024-01-15
+
+### Added
+- Initial release
+"""
+    (tmp_path / "CHANGELOG.md").write_text(changelog_content, encoding="utf-8")
+    (tmp_path / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.10)\n"
+        "project(meta_pkg VERSION 1.0.0)\n"
+        "add_subdirectory(pkg_a)\n"
+        "add_subdirectory(pkg_b)\n",
+        encoding="utf-8",
+    )
+
+    for package_name in ("pkg_a", "pkg_b"):
+        package_dir = tmp_path / package_name
+        package_dir.mkdir()
+        (package_dir / "package.xml").write_text(
+            f"""<?xml version="1.0"?>
+<package format="2">
+  <name>{package_name}</name>
+  <version>1.0.0</version>
+  <description>{package_name}</description>
+</package>
+""",
+            encoding="utf-8",
+        )
+        (package_dir / "CMakeLists.txt").write_text(
+            f"cmake_minimum_required(VERSION 3.10)\nproject({package_name} VERSION 1.0.0)\n",
+            encoding="utf-8",
+        )
+
+    return tmp_path
+
+
+@pytest.fixture
+def nested_packages_only_dir(tmp_path):
+    """Create a repository containing only nested ROS packages (no root files)."""
+    for package_name in ("pkg_a", "pkg_b"):
+        package_dir = tmp_path / package_name
+        package_dir.mkdir()
+        (package_dir / "package.xml").write_text(
+            f"<package><name>{package_name}</name><version>1.0.0</version></package>",
+            encoding="utf-8",
+        )
+        (package_dir / "CMakeLists.txt").write_text(
+            f"project({package_name} VERSION 1.0.0)\n",
+            encoding="utf-8",
+        )
+
     return tmp_path
 
 
@@ -388,6 +470,25 @@ def test_yaml_extractor_nested_key(tmp_path):
 
 
 # ============================================================================
+# TEST ConanfileVersionExtractor
+# ============================================================================
+def test_conanfile_extractor_get_version(sample_conanfile_py):
+    """Test ConanfileVersionExtractor can read version from conanfile.py."""
+    extractor = release.ConanfileVersionExtractor(sample_conanfile_py)
+    assert extractor.get_version() == "1.2.3"
+
+
+def test_conanfile_extractor_update_version(sample_conanfile_py):
+    """Test ConanfileVersionExtractor can update version."""
+    extractor = release.ConanfileVersionExtractor(sample_conanfile_py)
+    extractor.update_version("4.5.6")
+    assert extractor.get_version() == "4.5.6"
+    # Verify structure is preserved
+    content = sample_conanfile_py.read_text(encoding="utf-8")
+    assert "name = " in content and "class Pkg:" in content
+
+
+# ============================================================================
 # TEST CMakeListsVersionExtractor
 # ============================================================================
 
@@ -463,14 +564,15 @@ def test_cmake_extractor_update_version_simple(sample_cmake_lists):
     assert 'DESCRIPTION "A test project"' in content
 
 
-def test_cmake_extractor_update_version_multiline(tmp_path):
-    """Test CMakeListsVersionExtractor can update version in multiline project()."""
-    content = """cmake_minimum_required(VERSION 3.22)
+@pytest.mark.parametrize("version_format", ["1.0.0", '"1.0.0"'])
+def test_cmake_extractor_update_version_multiline(tmp_path, version_format):
+    """Test CMakeListsVersionExtractor can update version in multiline project() with and without quotes."""
+    content = f"""cmake_minimum_required(VERSION 3.22)
 
 project(
   TestProject
   DESCRIPTION "Test project"
-  VERSION 1.0.0
+  VERSION {version_format}
   LANGUAGES CXX
 )
 """
@@ -483,17 +585,19 @@ project(
     assert extractor.get_version() == "1.2.3"
     content = file_path.read_text(encoding="utf-8")
     assert "VERSION 1.2.3" in content
+    assert '"1.2.3"' not in content
 
 
-def test_cmake_extractor_update_fallback_version(tmp_path):
-    """Test CMakeListsVersionExtractor updates both fallback and project version."""
-    content = """cmake_minimum_required(VERSION 3.22)
+@pytest.mark.parametrize("version_format", ["1.0.0", '"1.0.0"'])
+def test_cmake_extractor_update_fallback_version(tmp_path, version_format):
+    """Test CMakeListsVersionExtractor updates both fallback and project version, ensuring quotes are dropped."""
+    content = f"""cmake_minimum_required(VERSION 3.22)
 
-set(PROJECT_VERSION "1.0.0")
+set(PROJECT_VERSION {version_format})
 
 project(
   TestProject
-  VERSION ${PROJECT_VERSION}
+  VERSION ${{PROJECT_VERSION}}
   LANGUAGES NONE
 )
 """
@@ -503,9 +607,10 @@ project(
     extractor = release.CMakeListsVersionExtractor(file_path)
     extractor.update_version("2.5.0")
 
-    # Check that fallback was updated
+    # Check that fallback was updated and has no quotes
     content = file_path.read_text(encoding="utf-8")
-    assert 'set(PROJECT_VERSION "2.5.0")' in content
+    assert "set(PROJECT_VERSION 2.5.0)" in content
+    assert '"2.5.0"' not in content
 
 
 def test_cmake_extractor_no_version_found(tmp_path):
@@ -557,6 +662,108 @@ add_library(mylib src/lib.cpp)
 
 
 # ============================================================================
+# TEST DebianChangelogVersionExtractor
+# ============================================================================
+
+
+# A simple mock function that matches the signature of jrl_release's real run_git_command
+# This is used to monkeypatch the jrl_release module to ensure environment repeatability
+def mock_run_git_command(args, cwd):
+    if "user.name" in args:
+        return True, "Jane Doe"
+    if "user.email" in args:
+        return True, "jane.doe@example.com"
+    return False, ""
+
+
+def test_debian_extractor_get_version_strips_suffix(tmp_path):
+    """Test that get_version successfully extracts only the upstream version part."""
+    content = """my-package (1.3.3-1debian1) unstable; urgency=medium
+
+  * Bug fixes.
+
+ -- Maintainer <maintainer@example.com>  Sat, 04 Jul 2026 12:00:00 +0200
+"""
+    file_path = tmp_path / "changelog"
+    file_path.write_text(content, encoding="utf-8")
+
+    extractor = release.DebianChangelogVersionExtractor(file_path)
+
+    # Should cleanly return just the core upstream version
+    assert extractor.get_version() == "1.3.3"
+
+
+def test_debian_extractor_update_version_preserves_suffix(tmp_path, monkeypatch):
+    """Test updating the version creates a new block while maintaining the exact custom debian suffix."""
+    # Use mock run_git_command to ensure environment repeatability
+    monkeypatch.setattr("jrl_release.run_git_command", mock_run_git_command)
+
+    content = """my-package (1.3.2-1debian1) unstable; urgency=medium
+
+  * Previous release.
+
+ -- Jane Doe <jane.doe@example.com>  Fri, 03 Jul 2026 12:00:00 +0200
+"""
+    file_path = tmp_path / "changelog"
+    file_path.write_text(content, encoding="utf-8")
+
+    extractor = release.DebianChangelogVersionExtractor(file_path)
+    extractor.update_version("1.3.3")
+
+    updated_content = file_path.read_text(encoding="utf-8")
+
+    # Verify the new top entry structure and version serialization
+    assert updated_content.startswith(
+        "my-package (1.3.3-1debian1) unstable; urgency=medium"
+    )
+    assert "Jane Doe <jane.doe@example.com>" in updated_content
+    assert "my-package (1.3.2-1debian1)" in updated_content
+
+
+def test_debian_extractor_update_version_no_duplicate(tmp_path):
+    """Test that update_version exits early if the core upstream version is already current."""
+    content = """my-package (1.3.3-1debian1) unstable; urgency=medium
+
+  * Current release.
+
+ -- Jane Doe <jane.doe@example.com>  Sat, 04 Jul 2026 12:00:00 +0200
+"""
+    file_path = tmp_path / "changelog"
+    file_path.write_text(content, encoding="utf-8")
+
+    extractor = release.DebianChangelogVersionExtractor(file_path)
+    extractor.update_version("1.3.3")
+
+    updated_content = file_path.read_text(encoding="utf-8")
+
+    # Count occurrences; should not append a duplicate block since 1.3.3 is already live
+    assert updated_content.count("my-package") == 1
+
+
+def test_debian_extractor_update_explicit_suffix_provided(tmp_path, monkeypatch):
+    """Test that if a specific suffix is intentionally passed inside new_version, it overrides the old suffix."""
+    # Use mock run_git_command to ensure environment repeatability
+    monkeypatch.setattr("jrl_release.run_git_command", mock_run_git_command)
+
+    content = """my-package (1.3.2-1debian1) unstable; urgency=medium
+
+  * Previous release.
+
+ -- Jane Doe <jane.doe@example.com>  Fri, 03 Jul 2026 12:00:00 +0200
+"""
+    file_path = tmp_path / "changelog"
+    file_path.write_text(content, encoding="utf-8")
+
+    extractor = release.DebianChangelogVersionExtractor(file_path)
+    extractor.update_version("1.4.0-0ubuntu1")
+
+    updated_content = file_path.read_text(encoding="utf-8")
+    assert updated_content.startswith(
+        "my-package (1.4.0-0ubuntu1) unstable; urgency=medium"
+    )
+
+
+# ============================================================================
 # TEST ChangelogVersionExtractor
 # ============================================================================
 
@@ -583,7 +790,19 @@ def test_changelog_extractor_update_version(sample_changelog, capsys):
     # New version should be after Unreleased
     unreleased_idx = content.index("## [Unreleased]")
     new_version_idx = content.index(f"## [1.1.0] - {today}")
-    assert unreleased_idx < new_version_idx
+    old_version_idx = content.index("## [1.0.0] - 2024-01-15")
+    assert unreleased_idx < new_version_idx < old_version_idx
+
+    # Should have both Unreleased and new version links
+    assert "\n[Unreleased]: " in content
+    assert "\n[1.1.0]: " in content
+    assert "\n[1.0.0]: " in content
+
+    # New link should be between old and Unreleased
+    unreleased_link_idx = content.index("\n[Unreleased]: ")
+    new_version_link_idx = content.index("\n[1.1.0]: ")
+    old_version_link_idx = content.index("\n[1.0.0]: ")
+    assert unreleased_link_idx < new_version_link_idx < old_version_link_idx
 
 
 def test_changelog_extractor_no_unreleased(tmp_path, capsys):
@@ -934,7 +1153,7 @@ def test_git_tag_version_success(mocker, tmp_path, capsys):
         (True, "tag created"),  # tag -a
     ]
 
-    result = release.git_tag_version(tmp_path, "1.2.3", auto_confirm=True)
+    result, _ = release.git_tag_version(tmp_path, "1.2.3", auto_confirm=True)
 
     assert result is True
     captured = capsys.readouterr()
@@ -942,6 +1161,41 @@ def test_git_tag_version_success(mocker, tmp_path, capsys):
     ansi_escape = re.compile(r"\x1b\[[0-9;]*m")
     clean_output = ansi_escape.sub("", captured.out)
     assert "v1.2.3" in clean_output
+
+
+def test_git_tag_version_signed(mocker, tmp_path, capsys):
+    """Test git_tag_version signs the tag with 'git tag -s' when sign=True."""
+    mock_run = mocker.patch("jrl_release.run_git_command")
+    mock_run.side_effect = [
+        (True, ""),  # rev-parse --git-dir
+        (False, ""),  # rev-parse v1.2.3 (tag doesn't exist)
+        (True, "tag created"),  # tag -s
+    ]
+
+    result, _ = release.git_tag_version(tmp_path, "1.2.3", auto_confirm=True, sign=True)
+
+    assert result is True
+    # The actual tag creation is the third git call.
+    tag_call_args = mock_run.call_args_list[2].args[0]
+    assert tag_call_args[:3] == ["tag", "-s", "v1.2.3"]
+    assert "-a" not in tag_call_args
+
+
+def test_git_tag_version_unsigned_uses_annotated(mocker, tmp_path):
+    """Test git_tag_version defaults to an annotated tag ('git tag -a')."""
+    mock_run = mocker.patch("jrl_release.run_git_command")
+    mock_run.side_effect = [
+        (True, ""),  # rev-parse --git-dir
+        (False, ""),  # rev-parse v1.2.3 (tag doesn't exist)
+        (True, "tag created"),  # tag -a
+    ]
+
+    result, _ = release.git_tag_version(tmp_path, "1.2.3", auto_confirm=True)
+
+    assert result is True
+    tag_call_args = mock_run.call_args_list[2].args[0]
+    assert tag_call_args[:3] == ["tag", "-a", "v1.2.3"]
+    assert "-s" not in tag_call_args
 
 
 def test_git_tag_version_already_exists(mocker, tmp_path, capsys):
@@ -952,7 +1206,7 @@ def test_git_tag_version_already_exists(mocker, tmp_path, capsys):
         (True, "abc123"),  # rev-parse v1.2.3 (tag exists)
     ]
 
-    result = release.git_tag_version(tmp_path, "1.2.3", auto_confirm=True)
+    result, _ = release.git_tag_version(tmp_path, "1.2.3", auto_confirm=True)
 
     assert result is False
     captured = capsys.readouterr()
@@ -993,6 +1247,41 @@ def test_cli_check_version_success(project_dir, mocker, capsys):
     assert "SUCCESS" in captured.out or "1.0.0" in captured.out
 
 
+@pytest.mark.parametrize(
+    "tag,expected_code,expected_text",
+    [
+        ("v1.0.0", 0, "SUCCESS"),
+        ("v1.2.0", 1, "FAIL"),
+        ("1.0.0", 1, "FAIL"),
+    ],
+)
+def test_cli_check_version_check_tag(
+    project_dir, mocker, capsys, tag, expected_code, expected_text
+):
+    """Test CLI --check-version --check-tag with various tags."""
+    mocker.patch(
+        "sys.argv",
+        [
+            "jrl_release.py",
+            "--root",
+            str(project_dir),
+            "--check-version",
+            "--check-tag",
+            tag,
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        release.main()
+
+    if expected_code == 0:
+        assert exc_info.value.code == 0
+    else:
+        assert exc_info.value.code != 0
+    captured = capsys.readouterr()
+    assert expected_text in captured.out or tag in captured.out
+
+
 def test_cli_check_version_mismatch(tmp_path, mocker, capsys):
     """Test CLI --check-version with version mismatch."""
     (tmp_path / "package.xml").write_text("<version>1.0.0</version>")
@@ -1006,6 +1295,8 @@ def test_cli_check_version_mismatch(tmp_path, mocker, capsys):
         release.main()
 
     assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "--update-version" in captured.out
 
 
 def test_cli_check_version_json_output(project_dir, mocker, capsys):
@@ -1043,6 +1334,57 @@ def test_cli_check_version_short_output(project_dir, mocker, capsys):
 
     captured = capsys.readouterr()
     assert captured.out.strip() == "1.0.0"
+
+
+def test_cli_check_version_short_output_nested_packages_only(
+    nested_packages_only_dir, mocker, capsys
+):
+    """--check-version --short works when only nested packages carry the version."""
+    mocker.patch(
+        "sys.argv",
+        [
+            "jrl_release.py",
+            "--root",
+            str(nested_packages_only_dir),
+            "--check-version",
+            "--short",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        release.main()
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "1.0.0"
+
+
+def test_cli_update_version_meta_package(meta_package_dir, mocker):
+    """--update-version updates the root and every nested ROS package."""
+    mocker.patch(
+        "sys.argv",
+        [
+            "jrl_release.py",
+            "--root",
+            str(meta_package_dir),
+            "--update-version",
+            "2.3.4",
+        ],
+    )
+
+    try:
+        release.main()
+    except SystemExit as e:
+        assert e.code == 0
+
+    for package_name in ("pkg_a", "pkg_b"):
+        package_xml = (meta_package_dir / package_name / "package.xml").read_text()
+        cmake_lists = (meta_package_dir / package_name / "CMakeLists.txt").read_text()
+        assert "<version>2.3.4</version>" in package_xml
+        assert "VERSION 2.3.4" in cmake_lists
+
+    # Root files updated too.
+    assert "VERSION 2.3.4" in (meta_package_dir / "CMakeLists.txt").read_text()
+    assert "## [2.3.4] - " in (meta_package_dir / "CHANGELOG.md").read_text()
 
 
 def test_cli_list_files(project_dir, mocker, capsys):
@@ -1219,7 +1561,7 @@ def test_cli_git_commit_and_tag(project_dir, mocker, capsys):
     mock_run.side_effect = [
         (True, ""),  # rev-parse --git-dir (commit check)
         (True, "M file.txt"),  # status --porcelain
-        (True, ""),  # add -u
+        (True, ""),  # add <files_to_stage>
         (True, "committed"),  # commit
         (True, ""),  # rev-parse --git-dir (tag check)
         (False, ""),  # rev-parse v1.0.1 (tag doesn't exist)
@@ -1321,6 +1663,206 @@ def test_list_version_files_display(project_dir):
         assert "pyproject.toml" in output
     finally:
         release.console = old_console
+
+
+# ============================================================================
+# TEST Meta-package Discovery
+# ============================================================================
+
+
+def test_discover_package_roots_meta_package(meta_package_dir):
+    """discover_package_roots returns only the nested package roots (root excluded)."""
+    roots = release.discover_package_roots(meta_package_dir)
+
+    assert roots == [
+        meta_package_dir / "pkg_a",
+        meta_package_dir / "pkg_b",
+    ]
+
+
+def test_discover_package_roots_single_package_excludes_root(project_dir):
+    """A single package at the root yields no *nested* roots."""
+    assert release.discover_package_roots(project_dir) == []
+
+
+def test_discover_package_roots_skips_hidden_dirs(tmp_path):
+    """package.xml under any hidden dir (.git, .pixi, .cache) is skipped, no git needed."""
+    for hidden in (".git", ".pixi", ".cache"):
+        pkg = tmp_path / hidden / "pkg_x"
+        pkg.mkdir(parents=True)
+        (pkg / "package.xml").write_text(
+            "<package><version>1.0.0</version></package>", encoding="utf-8"
+        )
+
+    real_pkg = tmp_path / "pkg_a"
+    real_pkg.mkdir()
+    (real_pkg / "package.xml").write_text(
+        "<package><version>1.0.0</version></package>", encoding="utf-8"
+    )
+
+    assert release.discover_package_roots(tmp_path) == [real_pkg]
+
+
+def test_discover_package_roots_hidden_check_relative_to_root(tmp_path):
+    """A hidden component *above* the root must not exclude everything below it."""
+    root = tmp_path / ".hidden_parent" / "repo"
+    pkg = root / "pkg_a"
+    pkg.mkdir(parents=True)
+    (pkg / "package.xml").write_text(
+        "<package><version>1.0.0</version></package>", encoding="utf-8"
+    )
+
+    assert release.discover_package_roots(root) == [pkg]
+
+
+def test_discover_package_roots_no_builtin_noise_filter(tmp_path):
+    """Without a .gitignore, non-hidden dirs like build/ are NOT skipped (user's call)."""
+    build_pkg = tmp_path / "build" / "pkg_x"
+    build_pkg.mkdir(parents=True)
+    (build_pkg / "package.xml").write_text(
+        "<package><version>1.0.0</version></package>", encoding="utf-8"
+    )
+
+    assert release.discover_package_roots(tmp_path) == [build_pkg]
+
+
+def _init_git_repo(root):
+    """Initialize a minimal git repo for check-ignore tests."""
+    for cmd in (
+        ["init"],
+        ["config", "user.email", "t@t"],
+        ["config", "user.name", "t"],
+    ):
+        subprocess.run(["git"] + cmd, cwd=root, check=True, capture_output=True)
+
+
+def test_discover_package_roots_respects_gitignore(tmp_path):
+    """A package.xml under a git-ignored directory is skipped during discovery."""
+    _init_git_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("vendored/\n", encoding="utf-8")
+
+    ignored_pkg = tmp_path / "vendored" / "dep"
+    ignored_pkg.mkdir(parents=True)
+    (ignored_pkg / "package.xml").write_text(
+        "<package><version>9.9.9</version></package>", encoding="utf-8"
+    )
+
+    real_pkg = tmp_path / "pkg_a"
+    real_pkg.mkdir()
+    (real_pkg / "package.xml").write_text(
+        "<package><version>1.0.0</version></package>", encoding="utf-8"
+    )
+
+    assert release.discover_package_roots(tmp_path) == [real_pkg]
+
+
+def test_discover_package_roots_skips_submodules(tmp_path):
+    """A package.xml inside a git submodule (per .gitmodules) is skipped."""
+    _init_git_repo(tmp_path)
+    (tmp_path / ".gitmodules").write_text(
+        '[submodule "dep"]\n\tpath = ext/dep\n\turl = https://example.com/dep.git\n',
+        encoding="utf-8",
+    )
+
+    submodule_pkg = tmp_path / "ext" / "dep"
+    submodule_pkg.mkdir(parents=True)
+    (submodule_pkg / "package.xml").write_text(
+        "<package><version>9.9.9</version></package>", encoding="utf-8"
+    )
+
+    real_pkg = tmp_path / "pkg_a"
+    real_pkg.mkdir()
+    (real_pkg / "package.xml").write_text(
+        "<package><version>1.0.0</version></package>", encoding="utf-8"
+    )
+
+    assert release.discover_package_roots(tmp_path) == [real_pkg]
+
+
+def test_git_submodule_dirs_empty_without_gitmodules(tmp_path):
+    """No .gitmodules (or no repo) yields no submodule dirs."""
+    assert release.git_submodule_dirs(tmp_path) == set()
+    _init_git_repo(tmp_path)
+    assert release.git_submodule_dirs(tmp_path) == set()
+
+
+def test_drop_git_ignored_noop_without_git(tmp_path):
+    """Outside a git repo, no paths are dropped."""
+    pkg = tmp_path / "pkg_a"
+    pkg.mkdir()
+    xml = pkg / "package.xml"
+    xml.write_text("<package><version>1.0.0</version></package>", encoding="utf-8")
+
+    assert release.drop_git_ignored(tmp_path, [xml]) == [xml]
+
+
+def test_collect_version_checks_single_package_unchanged(project_dir):
+    """Single-package repos yield exactly the seven base root checks."""
+    checks = release.collect_version_checks(project_dir)
+    check_paths = {check.file_path for check in checks}
+
+    assert check_paths == {
+        project_dir / "package.xml",
+        project_dir / "pyproject.toml",
+        project_dir / "CHANGELOG.md",
+        project_dir / "pixi.toml",
+        project_dir / "CITATION.cff",
+        project_dir / "CMakeLists.txt",
+        project_dir / "debian/changelog",
+        project_dir / "conanfile.py",
+    }
+
+
+def test_collect_version_checks_meta_package(meta_package_dir):
+    """Version checks are collected from the root and every nested package."""
+    checks = release.collect_version_checks(meta_package_dir)
+    check_paths = {check.file_path for check in checks}
+
+    # Root metadata + root CMakeLists (root CMake is version-managed).
+    assert meta_package_dir / "CHANGELOG.md" in check_paths
+    assert meta_package_dir / "CMakeLists.txt" in check_paths
+    # Nested packages.
+    assert meta_package_dir / "pkg_a" / "package.xml" in check_paths
+    assert meta_package_dir / "pkg_a" / "CMakeLists.txt" in check_paths
+    assert meta_package_dir / "pkg_b" / "package.xml" in check_paths
+    assert meta_package_dir / "pkg_b" / "CMakeLists.txt" in check_paths
+
+
+def test_collect_version_checks_labels_are_root_relative(meta_package_dir):
+    """Nested files with identical basenames get distinct, root-relative labels."""
+    checks = release.collect_version_checks(meta_package_dir)
+    labels = {check.label for check in checks}
+
+    # Root files keep their bare basename.
+    assert "CMakeLists.txt" in labels
+    # Nested files are disambiguated by their relative path.
+    assert str(Path("pkg_a") / "package.xml") in labels
+    assert str(Path("pkg_b") / "package.xml") in labels
+    assert str(Path("pkg_a") / "CMakeLists.txt") in labels
+
+
+def test_create_backups_nested_no_collision(tmp_path):
+    """Nested files sharing a basename get distinct backups (no clobbering)."""
+    (tmp_path / "pkg_a").mkdir()
+    (tmp_path / "pkg_b").mkdir()
+    a = tmp_path / "pkg_a" / "package.xml"
+    b = tmp_path / "pkg_b" / "package.xml"
+    a.write_text("<version>1.0.0</version>", encoding="utf-8")
+    b.write_text("<version>2.0.0</version>", encoding="utf-8")
+
+    backups = release.create_backups([a, b])
+
+    # Both originals are backed up to distinct files.
+    assert len(backups) == 2
+    assert len(set(backups.values())) == 2
+
+    # Corrupt the originals, then restore and confirm each got its own content.
+    a.write_text("CORRUPT", encoding="utf-8")
+    b.write_text("CORRUPT", encoding="utf-8")
+    release.restore_backups(backups)
+
+    assert a.read_text() == "<version>1.0.0</version>"
+    assert b.read_text() == "<version>2.0.0</version>"
 
 
 # ============================================================================
