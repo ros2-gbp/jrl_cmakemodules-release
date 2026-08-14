@@ -56,6 +56,11 @@ uv run --no-project jrl_release.py --bump patch --git-commit --git-tag
 | `--git-commit [MSG]` | Commit changes. Optional message (`{version}` placeholder). |
 | `--git-tag [NAME]` | Create a tag. Optional name (`{version}` placeholder). |
 | `--git-tag-message <MSG>` | Tag annotation (`{version}` placeholder). |
+| `--sign-tag` | GPG-sign the tag (`git tag -s`). Needs a configured signing key. |
+| `--push-tag` | Push the tag to the main repository. Only works with github for now. |
+| `--git-archive` | Create a .tar.gz archive. |
+| `--sign-archive` | GPG-sign the archive. Needs a configured signing key. |
+| `--gh-release` | Create Github release. Needs a configured gh cli. |
 
 **Git defaults**: commit `chore: bump version to {version}`, tag `v{version}`, tag message `Release version {version}`.
 
@@ -63,19 +68,34 @@ uv run --no-project jrl_release.py --bump patch --git-commit --git-tag
 
 | File | Key |
 | :--- | :--- |
-| `package.xml` | `<version>` tag |
-| `pyproject.toml` | `project.version` |
+| `package.xml` | `<version> and <url>` tag |
+| `pyproject.toml` | `project.version` and `project.urls` |
 | `CHANGELOG.md` | First `## [X.Y.Z]` section (not Unreleased) |
 | `pixi.toml` | `[workspace] version` |
 | `pixi.lock` | Regenerated via `pixi list` |
 | `CITATION.cff` | `version` key |
-| `CMakeLists.txt` | `project(... VERSION X.Y.Z ...)` |
+| `CMakeLists.txt` | `project(... VERSION X.Y.Z ... HOMEPAGE_URL ...)` |
+| `debian/changelog` | `version = ...` |
+| `conanfile.py` | `version = ...` |
 
 > Requires `pixi` CLI if `pixi.lock` exists in the project root.
+
+## Meta-packages
+
+ROS meta-packages are handled automatically: every nested directory with a
+`package.xml` is treated like the repository root — the full set of
+supported files (`package.xml`, `pyproject.toml`, `CHANGELOG.md`, `pixi.toml`,
+`CITATION.cff`, `CMakeLists.txt`, `debian/changelog`) is checked there too,
+skipping any that don't exist in that nested directory.
+Discovery skips hidden directories (`.git`, `.pixi`, `.venv`, …), git submodules,
+and — honoring your `.gitignore` via `git check-ignore` — ignored dirs like
+`build/` or `dist/`. All discovered files must agree on a single
+version to bump version.
 """
 
 import sys
 import re
+import os
 import argparse
 import datetime
 import json
@@ -121,6 +141,8 @@ STYLE_NEW_VALUE = "green"
 STYLE_UNCHANGED_VALUE = "dim"
 STYLE_HIGHLIGHT = "cyan"
 
+GITHUB_URL = "https://github.com/"
+
 
 class VersionNotPresent(Exception):
     """Raised when a file exists but has no version field configured."""
@@ -131,6 +153,8 @@ class VersionNotPresent(Exception):
 class VersionExtractor(ABC):
     def __init__(self, file_path: Path):
         self.file_path = file_path
+        # Display label; discovery overrides it with a root-relative path.
+        self.label = file_path.name
 
     @abstractmethod
     def get_version(self) -> str:
@@ -150,6 +174,17 @@ class VersionExtractor(ABC):
     @property
     def path(self) -> str:
         return str(self.file_path)
+
+    def get_url(self) -> str | None:
+        return None
+
+    def validate_url(self, url: str) -> str | None:
+        if match := re.match(GITHUB_URL + r"[^/]+/[^/]+", url.strip("/").lower()):
+            valid_url = match.group()
+            console.print(
+                f"[{STYLE_INFO}]Found url {valid_url} in '{self.file_path}'[/{STYLE_INFO}]"
+            )
+            return valid_url
 
 
 class XmlVersionExtractor(VersionExtractor):
@@ -176,6 +211,14 @@ class XmlVersionExtractor(VersionExtractor):
 
         with open(self.file_path, "w", encoding="utf-8") as f:
             f.write(new_content)
+
+    def get_url(self) -> str | None:
+        with open(self.file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        for url in re.findall(r"<url[^>]*>(.*?)</url>", content, re.I):
+            if valid_url := self.validate_url(url):
+                return valid_url
+        return None
 
 
 class TomlVersionExtractor(VersionExtractor):
@@ -215,6 +258,15 @@ class TomlVersionExtractor(VersionExtractor):
         with open(self.file_path, "w", encoding="utf-8") as f:
             tomlkit.dump(data, f)
 
+    def get_url(self) -> str | None:
+        with open(self.file_path, "r", encoding="utf-8") as f:
+            data = tomlkit.load(f)
+        if "project" in data and "urls" in data["project"]:
+            for url in data["project"]["urls"].values():
+                if valid_url := self.validate_url(url):
+                    return valid_url
+        return None
+
 
 class YamlVersionExtractor(VersionExtractor):
     def __init__(self, file_path: Path, keys: List[str]):
@@ -252,6 +304,24 @@ class YamlVersionExtractor(VersionExtractor):
             self.yaml.dump(data, f)
 
 
+class ConanfileVersionExtractor(VersionExtractor):
+    def get_version(self) -> str:
+        content = self.file_path.read_text()
+        if match := re.search(r'\s*version\s*=\s*["\']([^"\']+)["\']', content):
+            return match.group(1)
+        raise VersionNotPresent(f"Version not found in {self.name}")
+
+    def update_version(self, new_version: str) -> None:
+        pattern = re.compile(r'(\s*version\s*=\s*["\'])([^"\']+)(["\'])')
+        content = self.file_path.read_text()
+        if not pattern.search(content):
+            raise VersionNotPresent(f"Version not found in {self.name}")
+        new_content, count = pattern.subn(
+            lambda m: f"{m.group(1)}{new_version}{m.group(3)}", content, count=1
+        )
+        self.file_path.write_text(new_content)
+
+
 class CMakeListsVersionExtractor(VersionExtractor):
     """Specialized extractor for CMakeLists.txt that uses cmake-parser
     and handles both direct VERSION and variables (e.g., from package.xml)."""
@@ -287,7 +357,7 @@ class CMakeListsVersionExtractor(VersionExtractor):
                                 ver = args[version_idx + 1]
                                 # Check if it's a variable reference
                                 if not ver.startswith("${"):
-                                    project_version = ver
+                                    project_version = ver.strip('"')
                         except ValueError:
                             pass
 
@@ -304,6 +374,13 @@ class CMakeListsVersionExtractor(VersionExtractor):
 
         return self._get_version_regex(content)
 
+    def get_url(self) -> str | None:
+        with open(self.file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        if match := re.search(r'HOMEPAGE_URL\s+"([^"]+)"', content):
+            return self.validate_url(match.group(1))
+        return None
+
     def _get_command_args(self, node) -> List[str]:
         """Extract arguments from a cmake command node."""
         args = []
@@ -315,16 +392,16 @@ class CMakeListsVersionExtractor(VersionExtractor):
 
     def _get_version_regex(self, content: str) -> str:
         """Fallback regex-based version extraction."""
-        # First try to find set(PROJECT_VERSION "X.Y.Z")
+        # Finds set(PROJECT_VERSION "X.Y.Z") or set(PROJECT_VERSION X.Y.Z)
         fallback_pattern = re.compile(
-            r'set\s*\(\s*PROJECT_VERSION\s+"([0-9]+\.[0-9]+\.[0-9]+)"',
+            r'set\s*\(\s*PROJECT_VERSION\s+"?([0-9]+\.[0-9]+\.[0-9]+)"?\s*\)',
             re.MULTILINE,
         )
         fallback_match = fallback_pattern.search(content)
 
         # Also check if project() uses a literal version or variable
         project_pattern = re.compile(
-            r"project\s*\([^)]*VERSION\s+([\d.]+|\$\{[^}]+\})", re.MULTILINE
+            r'project\s*\([^)]*VERSION\s+"?([\d.]+|\$\{[^}]+\})"?', re.MULTILINE
         )
         project_match = project_pattern.search(content)
 
@@ -346,20 +423,22 @@ class CMakeListsVersionExtractor(VersionExtractor):
         with open(self.file_path, "r", encoding="utf-8") as f:
             content = f.read()
 
-        # Update the fallback version in set(PROJECT_VERSION "...")
+        # 1. Update fallback version: matches set(PROJECT_VERSION 1.2.3) or set(PROJECT_VERSION "1.2.3")
+        #    Always replaces it without quotes: set(PROJECT_VERSION 1.2.3)
         fallback_pattern = re.compile(
-            r'(set\s*\(\s*PROJECT_VERSION\s+)"([0-9]+\.[0-9]+\.[0-9]+)"',
+            r'(set\s*\(\s*PROJECT_VERSION\s+)"?([0-9]+\.[0-9]+\.[0-9]+)"?\s*\)',
             re.MULTILINE,
         )
 
         def repl_fallback(match):
-            return f'{match.group(1)}"{new_version}"'
+            return f"{match.group(1)}{new_version})"
 
         content = fallback_pattern.sub(repl_fallback, content, count=1)
 
-        # Also update literal version in project() if present
+        # 2. Update literal version in project(): matches VERSION 1.2.3 or VERSION "1.2.3"
+        #    Always replaces it without quotes: VERSION 1.2.3
         project_pattern = re.compile(
-            r"(project\s*\([^)]*VERSION\s+)([\d.]+)", re.MULTILINE
+            r'(project\s*\([^)]*VERSION\s+)"?([\d.]+)"?', re.MULTILINE
         )
 
         def repl_project(match):
@@ -369,6 +448,114 @@ class CMakeListsVersionExtractor(VersionExtractor):
 
         with open(self.file_path, "w", encoding="utf-8") as f:
             f.write(content)
+
+
+class DebianChangelogVersionExtractor(VersionExtractor):
+    """Specialized extractor for debian/changelog files.
+
+    Expects standard format: package (version) distribution; urgency=...
+    """
+
+    @property
+    def name(self) -> str:
+        return "debian/changelog"
+
+    def get_version(self) -> str:
+        """Extracts and returns the clean upstream version string (omitting the Debian suffix)."""
+        with open(self.file_path, "r", encoding="utf-8") as f:
+            first_line = f.readline()
+
+        if not first_line:
+            raise VersionNotPresent(f"Changelog file {self.name} is empty")
+
+        match = re.match(r"^[a-zA-Z0-9.+_-]+\s+\(([^)]+)\)", first_line)
+        if match:
+            full_version = match.group(1)
+            # Splits on '-' or '~' to strip the packaging revision (e.g., '1.3.3-1debian1' -> '1.3.3')
+            return re.split(r"[-~]", full_version)[0]
+
+        raise VersionNotPresent(
+            f"Could not parse Debian version from first line of {self.name}"
+        )
+
+    def _get_raw_full_version(self) -> str:
+        """Internal helper to get the un-stripped full version string with its suffix."""
+        with open(self.file_path, "r", encoding="utf-8") as f:
+            first_line = f.readline()
+        match = re.match(r"^[a-zA-Z0-9.+_-]+\s+\(([^)]+)\)", first_line)
+        return match.group(1) if match else ""
+
+    def update_version(self, new_version: str) -> None:
+        # Compare core upstream versions safely to avoid duplicate entries
+        try:
+            if self.get_version() == re.split(r"[-~]", new_version)[0]:
+                return  # Skip adding a duplicate entry
+        except VersionNotPresent:
+            pass
+
+        # Grab the raw full version string to parse its suffix before reading full file
+        try:
+            current_full_version = self._get_raw_full_version()
+        except Exception:
+            current_full_version = ""
+
+        with open(self.file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # Parse the first line to reuse metadata
+        first_line = content.splitlines()[0] if content.strip() else ""
+        match = re.match(
+            r"^([a-zA-Z0-9.+_-]+)\s+\([^)]+\)\s+([^;]+);\s*(urgency=\w+)",
+            first_line,
+        )
+
+        if match:
+            package_name = match.group(1)
+            distribution = match.group(2).strip()
+            urgency = match.group(3)
+        else:
+            package_name = "package"
+            distribution = "unstable"
+            urgency = "urgency=medium"
+
+        # Determine the final version string to write, preserving the suffix
+        new_upstream = re.split(r"[-~]", new_version)[0]
+        if "-" in new_version or "~" in new_version:
+            formatted_version = new_version
+        elif current_full_version and (
+            "-" in current_full_version or "~" in current_full_version
+        ):
+            suffix_match = re.search(r"([-~].*)$", current_full_version)
+            suffix = suffix_match.group(1) if suffix_match else "-1"
+            formatted_version = f"{new_upstream}{suffix}"
+        else:
+            formatted_version = f"{new_upstream}-1"
+
+        # Fetch maintainer details
+        repo_dir = self.file_path.parent
+        name_ok, git_name = run_git_command(["config", "user.name"], cwd=repo_dir)
+        email_ok, git_email = run_git_command(["config", "user.email"], cwd=repo_dir)
+
+        if name_ok and email_ok:
+            maintainer = f"{git_name} <{git_email}>"
+        else:
+            maintainer = "Maintainer <maintainer@example.com>"
+
+        # Format RFC 5322 timestamp
+        now = datetime.datetime.now(datetime.timezone.utc).astimezone()
+        debian_date = now.strftime("%a, %d %b %Y %H:%M:%S %z")
+
+        # Write out using the compliant version with the preserved suffix
+        new_entry = (
+            f"{package_name} ({formatted_version}) {distribution}; {urgency}\n\n"
+            f"  * New release: version {new_upstream}\n\n"
+            f" -- {maintainer}  {debian_date}\n\n"
+        )
+
+        updated_content = new_entry + content
+
+        with open(self.file_path, "w", encoding="utf-8") as f:
+            f.write(updated_content)
 
 
 class ChangelogVersionExtractor(VersionExtractor):
@@ -392,6 +579,8 @@ class ChangelogVersionExtractor(VersionExtractor):
 
         today = datetime.date.today().isoformat()
 
+        # Insert new release section
+
         pattern = r"^## \[Unreleased\]"
         if not re.search(pattern, content, re.MULTILINE):
             console.print(
@@ -403,12 +592,221 @@ class ChangelogVersionExtractor(VersionExtractor):
 
         new_content = re.sub(pattern, replacement, content, count=1, flags=re.MULTILINE)
 
+        # Add new release link and update unreleased link
+
+        pattern = r"^\[Unreleased\]: (https://.+)/(v.+)\.\.\.HEAD$"
+
+        if match := re.search(pattern, new_content, re.MULTILINE):
+            url, old_version = match.groups()
+            replacement = f"[Unreleased]: {url}/v{new_version}...HEAD\n[{new_version}]: {url}/{old_version}...v{new_version}"
+            new_content = re.sub(pattern, replacement, new_content, flags=re.MULTILINE)
+        else:
+            console.print(
+                f"[{STYLE_WARNING}]Warning: Link definitions in CHANGELOG.md can't be updated automatically.[/{STYLE_WARNING}]"
+            )
+
         with open(self.file_path, "w", encoding="utf-8") as f:
             f.write(new_content)
 
-        console.print(
-            f"[{STYLE_INFO}]Updated CHANGELOG.md header. Note: Link definitions at the bottom were not updated automatically.[/{STYLE_INFO}]"
+        console.print(f"[{STYLE_INFO}]Updated CHANGELOG.md.[/{STYLE_INFO}]")
+
+
+def git_ignored_abs_dirs(repo_dir: Path) -> set:
+    """Absolute paths of git-ignored directories for the repo containing ``repo_dir``.
+
+    Runs ``git ls-files --directory`` from ``repo_dir`` so git resolves the
+    enclosing repository itself; paths are reported relative to ``repo_dir`` and
+    resolved to absolute Paths. Empty when ``repo_dir`` is not inside a repo.
+
+    Used to prune ignored dirs (e.g. build/, output/) during discovery instead
+    of walking into them.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--directory",
+                "-z",
+            ],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
         )
+    except (FileNotFoundError, OSError):
+        return set()
+
+    if result.returncode != 0:
+        return set()
+
+    return {
+        (repo_dir / entry.rstrip("/")).resolve()
+        for entry in result.stdout.split("\0")
+        if entry
+    }
+
+
+def drop_git_ignored(root_dir: Path, paths: List[Path]) -> List[Path]:
+    """Drop paths that git ignores, honoring each path's own enclosing repo.
+
+    Candidates may live in independent nested git repositories even when
+    ``root_dir`` is not itself a repo (e.g. a plain folder holding several
+    checkouts). Anchoring a single ``git check-ignore`` at ``root_dir`` would
+    then bail out entirely and leak ignored build trees like ``output/`` into
+    the results. Instead, resolve the repository that actually contains each
+    candidate and run ``git check-ignore`` there. Paths outside any repo are
+    always kept.
+    """
+    if not paths:
+        return paths
+
+    # Group candidates by the git repo top-level that contains them.
+    groups: Dict[Path, List[Path]] = {}
+    for p in paths:
+        ok, top = run_git_command(["rev-parse", "--show-toplevel"], p.parent)
+        if not ok or not top:
+            continue  # not inside any repo -> always kept
+        groups.setdefault(Path(top).resolve(), []).append(p)
+
+    ignored: set = set()
+    for top_path, repo_paths in groups.items():
+        rel = [str(p.resolve().relative_to(top_path)) for p in repo_paths]
+        try:
+            result = subprocess.run(
+                ["git", "check-ignore", "-z", "--stdin"],
+                cwd=top_path,
+                input="\0".join(rel) + "\0",
+                capture_output=True,
+                text=True,
+            )
+        except (FileNotFoundError, OSError):
+            continue  # keep this repo's candidates on git failure
+
+        # 0 = some ignored, 1 = none ignored; anything else is an error, keep all.
+        if result.returncode not in (0, 1):
+            continue
+
+        ignored_rel = {chunk for chunk in result.stdout.split("\0") if chunk}
+        ignored.update(p for p, r in zip(repo_paths, rel) if r in ignored_rel)
+
+    return [p for p in paths if p not in ignored]
+
+
+def git_submodule_dirs(root_dir: Path) -> set:
+    """Absolute paths of git submodule working trees (empty outside a git repo)."""
+    ok, top = run_git_command(["rev-parse", "--show-toplevel"], root_dir)
+    if not ok or not top:
+        return set()
+    top = Path(top)
+
+    ok, out = run_git_command(
+        ["config", "--file", ".gitmodules", "-z", "--get-regexp", "path"], top
+    )
+    if not ok or not out:
+        return set()
+
+    dirs = set()
+    for record in out.split("\0"):
+        key, _, value = record.partition("\n")
+        if key.endswith(".path") and value:
+            dirs.add((top / value).resolve())
+    return dirs
+
+
+def drop_submodules(root_dir: Path, paths: List[Path]) -> List[Path]:
+    """Drop paths inside git submodules (they are versioned independently)."""
+    if not paths:
+        return paths
+    subdirs = git_submodule_dirs(root_dir)
+    if not subdirs:
+        return paths
+    kept = []
+    for p in paths:
+        resolved = p.resolve()
+        if any(resolved == s or s in resolved.parents for s in subdirs):
+            continue
+        kept.append(p)
+    return kept
+
+
+def discover_package_roots(root_dir: Path) -> List[Path]:
+    """Discover nested ROS package roots (dirs with a package.xml, root excluded).
+
+    Skips hidden directories (.git, .pixi, ...), git submodules, and — inside a
+    git repo — anything git ignores (.gitignore, global excludes), like `fd`.
+
+    Hidden and ignored directories are pruned during the walk so we never
+    descend into large trees like `.venv` or `build/`. Nested repositories are
+    handled too: each one's ignore rules are learned when its top-level is
+    reached, so an ignored `output/` build tree is pruned even when `root_dir`
+    itself is not a git repo.
+    """
+    # Seed from root_dir's own repo (covers root being, or living inside, a repo).
+    ignored_abs = git_ignored_abs_dirs(root_dir)
+    candidates = []
+    for dirpath, dirnames, filenames in os.walk(root_dir):
+        current = Path(dirpath)
+        # A nested repo brings its own .gitignore; learn what it ignores before
+        # descending, so its build trees are pruned regardless of root_dir.
+        if current != root_dir and (current / ".git").exists():
+            ignored_abs |= git_ignored_abs_dirs(current)
+        kept = []
+        for d in dirnames:
+            if d.startswith("."):
+                continue
+            if ignored_abs and (current / d).resolve() in ignored_abs:
+                continue
+            kept.append(d)
+        dirnames[:] = kept
+        if current != root_dir and "package.xml" in filenames:
+            candidates.append(current / "package.xml")
+    candidates = drop_git_ignored(root_dir, candidates)
+    candidates = drop_submodules(root_dir, candidates)
+    return sorted({package_xml.parent for package_xml in candidates})
+
+
+def build_root_checks(root_dir: Path) -> List[VersionExtractor]:
+    """Build the version extractors tracked at the repository root."""
+    return [
+        XmlVersionExtractor(root_dir / "package.xml"),
+        TomlVersionExtractor(root_dir / "pyproject.toml", ["project", "version"]),
+        ChangelogVersionExtractor(root_dir / "CHANGELOG.md", r""),
+        TomlVersionExtractor(root_dir / "pixi.toml", ["workspace", "version"]),
+        YamlVersionExtractor(root_dir / "CITATION.cff", ["version"]),
+        CMakeListsVersionExtractor(root_dir / "CMakeLists.txt"),
+        DebianChangelogVersionExtractor(root_dir / "debian/changelog"),
+        ConanfileVersionExtractor(root_dir / "conanfile.py"),
+    ]
+
+
+def collect_version_checks(root_dir: Path) -> List[VersionExtractor]:
+    """Root checks plus the same set of checks for each nested package.
+
+    Each nested package is treated exactly like the repository root: the same
+    file/key combinations are checked, and any that don't exist in the nested
+    package directory are simply skipped (VersionExtractor.check_file_exists()).
+    """
+    checks = list(build_root_checks(root_dir))
+    seen_paths = {check.file_path for check in checks}
+
+    for package_root in discover_package_roots(root_dir):
+        for check in build_root_checks(package_root):
+            if check.file_path in seen_paths:
+                continue
+            checks.append(check)
+            seen_paths.add(check.file_path)
+
+    # Label nested files by their relative path so identical basenames stay distinct.
+    for check in checks:
+        try:
+            check.label = str(check.file_path.relative_to(root_dir))
+        except ValueError:
+            check.label = check.file_path.name
+
+    return checks
 
 
 def validate_semver(version: str) -> str:
@@ -443,22 +841,25 @@ def bump_version(version: str, bump_type: str) -> str:
         raise ValueError(f"Invalid bump type: {bump_type}")
 
 
-def get_current_version(checks: List[VersionExtractor]) -> Optional[str]:
-    """Get the current consensus version from all files."""
-    versions_found = set()
-    errors = []
-
+def collect_versions(
+    checks: List[VersionExtractor],
+) -> Tuple[set, List[str]]:
+    """Collect distinct versions and parse errors across all files. No console output."""
+    versions: set = set()
+    errors: List[str] = []
     for check in checks:
         if check.check_file_exists():
             try:
-                version = check.get_version()
-                versions_found.add(version)
+                versions.add(check.get_version())
             except VersionNotPresent:
                 pass  # file exists but has no version configured; skip
             except Exception as e:
-                errors.append(f"{check.name}: {e}")
+                errors.append(f"{check.label}: {e}")
+    return versions, errors
 
-    # Report parsing errors
+
+def report_version_problems(versions: set, errors: List[str]) -> None:
+    """Print parse warnings and version-mismatch errors from collect_versions()."""
     if errors:
         console.print(
             f"[{STYLE_WARNING}]Warning: Failed to parse version from some files:[/{STYLE_WARNING}]"
@@ -466,21 +867,25 @@ def get_current_version(checks: List[VersionExtractor]) -> Optional[str]:
         for error in errors:
             console.print(f"  [{STYLE_MUTED}]• {error}[/{STYLE_MUTED}]")
 
-    if len(versions_found) == 1:
-        return list(versions_found)[0]
-    elif len(versions_found) > 1:
+    if len(versions) > 1:
         console.print(
-            f"[{STYLE_ERROR}]Error: Multiple versions found: {', '.join(sorted(versions_found))}[/{STYLE_ERROR}]"
+            f"[{STYLE_INFO}]Tip:[/{STYLE_INFO}] use --update-version X.Y.Z to set a single version across all files."
         )
         console.print(
-            f"[{STYLE_WARNING}]Please run --check-version first to resolve conflicts.[/{STYLE_WARNING}]"
+            f"[{STYLE_ERROR}]Error: version mismatch — multiple versions found: "
+            f"{', '.join(sorted(versions))}[/{STYLE_ERROR}]"
         )
-        return None
-    else:
+    elif not versions:
         console.print(
             f"[{STYLE_ERROR}]Error: No version found in any files.[/{STYLE_ERROR}]"
         )
-        return None
+
+
+def get_current_version(checks: List[VersionExtractor]) -> Optional[str]:
+    """Consensus version across all files, reporting any problems."""
+    versions, errors = collect_versions(checks)
+    report_version_problems(versions, errors)
+    return next(iter(versions)) if len(versions) == 1 else None
 
 
 def infer_change_type(
@@ -675,14 +1080,19 @@ def git_tag_version(
     auto_confirm: bool,
     custom_tag_name: Optional[str] = None,
     custom_tag_message: Optional[str] = None,
-) -> bool:
-    """Create a git tag for the version."""
+    sign: bool = False,
+) -> Tuple[bool, str]:
+    """Create a git tag for the version.
+
+    When ``sign`` is True the tag is GPG-signed (``git tag -s``); otherwise an
+    annotated tag is created (``git tag -a``).
+    """
     success, _ = run_git_command(["rev-parse", "--git-dir"], root_dir)
     if not success:
         console.print(
             f"[{STYLE_WARNING}]Not a git repository, skipping git tag.[/{STYLE_WARNING}]"
         )
-        return False
+        return False, ""
 
     tag_name = (
         custom_tag_name.format(version=version) if custom_tag_name else f"v{version}"
@@ -698,7 +1108,7 @@ def git_tag_version(
         console.print(
             f"[{STYLE_WARNING}]Tag {tag_name} already exists.[/{STYLE_WARNING}]"
         )
-        return False
+        return False, ""
 
     if not auto_confirm:
         confirmed = Confirm.ask(
@@ -708,21 +1118,121 @@ def git_tag_version(
             console.print(f"[{STYLE_WARNING}]Git tag skipped.[/{STYLE_WARNING}]")
             return False
 
+    tag_flag = "-s" if sign else "-a"
     console.print(
-        f"[{STYLE_MUTED}]$ git tag -a {tag_name} -m '{tag_message}'[/{STYLE_MUTED}]"
+        f"[{STYLE_MUTED}]$ git tag {tag_flag} {tag_name} -m '{tag_message}'[/{STYLE_MUTED}]"
     )
     success, output = run_git_command(
-        ["tag", "-a", tag_name, "-m", tag_message], root_dir
+        ["tag", tag_flag, tag_name, "-m", tag_message], root_dir
     )
     if success:
         console.print(f"[{STYLE_SUCCESS}]✓ Created tag: {tag_name}[/{STYLE_SUCCESS}]")
-        console.print(
-            f"[{STYLE_MUTED}]  To push: git push origin {tag_name}[/{STYLE_MUTED}]"
-        )
-        return True
+        return True, tag_name
     else:
         console.print(f"[{STYLE_ERROR}]Failed to create tag: {output}[/{STYLE_ERROR}]")
+        return False, ""
+
+
+def push_tag(root_dir: Path, tag_name: str, project_url: str) -> bool:
+    url = project_url.replace(GITHUB_URL, "git@github.com:")
+    git_args = ["push", url, tag_name]
+    console.print(f"[{STYLE_MUTED}]$ git {' '.join(git_args)}")
+    success, output = run_git_command(git_args, cwd=root_dir)
+    if success:
+        console.print(f"[{STYLE_SUCCESS}]✓ Pushed tag: {tag_name}[/{STYLE_SUCCESS}]")
+    else:
+        console.print(f"[{STYLE_ERROR}]Failed to push tag: {output}[/{STYLE_ERROR}]")
+    return success
+
+
+def git_archive(
+    root_dir: Path, archive_name: str, tag_name: str, sign: bool = False
+) -> bool:
+    """Create a .tar.gz archive from git for the version.
+
+    When ``sign`` is True, a detached GPG .tar.gz.sig file is added.
+    """
+    git_args = ["archive", "--format", "tgz", "--output", archive_name, tag_name]
+    console.print(f"[{STYLE_MUTED}]$ git {' '.join(git_args)}")
+    success, output = run_git_command(git_args, cwd=root_dir)
+    if not success:
+        console.print(
+            f"[{STYLE_ERROR}]Failed to create archive: {output}[/{STYLE_ERROR}]"
+        )
         return False
+
+    if sign:
+        call = [
+            "gpg",
+            "--detach-sign",
+            "--armor",
+            "-o",
+            f"{archive_name}.sig",
+            archive_name,
+        ]
+        console.print(f"[{STYLE_MUTED}]$ {' '.join(call)}")
+        result = subprocess.run(call, cwd=root_dir, capture_output=True, text=True)
+        if result.returncode != 0:
+            console.print(
+                f"[{STYLE_ERROR}]Failed to sign archive: {result.stderr}[/{STYLE_ERROR}]"
+            )
+            return False
+
+    return True
+
+
+def gh_release(
+    root_dir: Path,
+    target_version: str,
+    project_url: str,
+    archive_name: str | None = None,
+    sign: bool = False,
+    dry_run: bool = False,
+) -> Tuple[bool, str]:
+    """Create a github release and return (success, output)."""
+
+    title = f"Release v{target_version}"
+    repo = project_url.removeprefix(GITHUB_URL)
+    call = ["gh", "release", "create", "--title", title, "--repo", repo]
+
+    # include latest release notes
+    changelog = root_dir / "CHANGELOG.md"
+    if changelog.is_file():
+        notes = changelog.read_text().split("\n## ")
+        if len(notes) >= 3:  # 0: header, 1: unreleased, 2: latest
+            today = datetime.date.today().isoformat()
+            call = [
+                *call,
+                "--notes",
+                notes[1].replace("[Unreleased]", f"[{target_version}] - {today}")
+                if dry_run
+                else notes[2],
+            ]
+        else:
+            console.print(
+                f"[{STYLE_WARNING}]Warning: No release notes available in CHANGELOG.md yet.[/{STYLE_WARNING}]"
+            )
+
+    call = [*call, f"v{target_version}"]
+
+    # include .tar.gz archive and .tar.gz.sig signature
+    if archive_name is not None:
+        call = [*call, archive_name]
+        if sign:
+            call = [*call, f"{archive_name}.sig"]
+
+    print_call = "$ '" + "' '".join(c.replace("'", "\\'") for c in call) + "'"
+    if dry_run:
+        return True, print_call
+
+    console.print(f"[{STYLE_MUTED}]$ {print_call}")
+    try:
+        result = subprocess.run(call, cwd=root_dir, capture_output=True, text=True)
+        if result.returncode != 0:
+            return False, result.stderr.strip()
+        return True, result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        return False, e.stderr or ""
 
 
 def update_pixi_lock(root_dir: Path, dry_run: bool = False) -> Optional[str]:
@@ -792,9 +1302,10 @@ def create_backups(file_paths: List[Path]) -> Dict[Path, Path]:
     backups = {}
     temp_dir = Path(tempfile.mkdtemp(prefix="release_backup_"))
 
-    for file_path in file_paths:
+    # Index-prefix the name so files sharing a basename don't collide.
+    for index, file_path in enumerate(file_paths):
         if file_path.exists():
-            backup_path = temp_dir / file_path.name
+            backup_path = temp_dir / f"{index:04d}_{file_path.name}"
             shutil.copy2(file_path, backup_path)
             backups[file_path] = backup_path
 
@@ -849,16 +1360,16 @@ def list_version_files(checks: List[VersionExtractor]) -> None:
             else f"[{STYLE_ERROR}]✗[/{STYLE_ERROR}]"
         )
         file_type = check.__class__.__name__.replace("VersionExtractor", "")
-        table.add_row(check.name, str(check.file_path), exists, file_type)
+        table.add_row(check.label, str(check.file_path), exists, file_type)
 
     console.print(table)
     sys.exit(0)
 
 
-def handle_check_version(checks: List[VersionExtractor], args) -> int:
+def handle_check_version(checks: List[VersionExtractor], args) -> bool:
     """Handle the --check-version command.
 
-    Returns the exit code.
+    Returns True if all files agree on one version, False otherwise.
     """
     results = []
     versions_found = set()
@@ -871,7 +1382,7 @@ def handle_check_version(checks: List[VersionExtractor], args) -> int:
 
     for check in checks:
         result = {
-            "file": check.name,
+            "file": check.label,
             "version": None,
             "status": "Unknown",
             "message": "",
@@ -904,13 +1415,14 @@ def handle_check_version(checks: List[VersionExtractor], args) -> int:
         consensus_version = "MISMATCH"
 
     if args.output_format == "json":
+        consistent = not errors and len(versions_found) == 1
         out_payload = {
             "consensus_version": consensus_version,
             "files": results,
-            "consistent": not errors and len(versions_found) == 1,
+            "consistent": consistent,
         }
         print(json.dumps(out_payload, indent=2))
-        return 1 if errors else 0
+        return consistent
 
     # Standard Rich table output
     table = Table(title="Version Check Summary", box=box.ROUNDED)
@@ -939,7 +1451,7 @@ def handle_check_version(checks: List[VersionExtractor], args) -> int:
             ):
                 version_display = f"[{STYLE_SUCCESS}]{res['version']}[/{STYLE_SUCCESS}]"
             elif consensus_version == "MISMATCH":
-                version_display = f"[{STYLE_WARNING}]{res['version']}[/{STYLE_WARNING}]"
+                version_display = f"[{STYLE_ERROR}]{res['version']}[/{STYLE_ERROR}]"
 
         table.add_row(res["file"], version_display, status_style, res["message"])
 
@@ -949,27 +1461,53 @@ def handle_check_version(checks: List[VersionExtractor], args) -> int:
     if args.short and consensus_version and consensus_version != "MISMATCH":
         print(consensus_version)
 
+    tag_check_failed = False
+    tag_format_is_valid = False
+    if hasattr(args, "check_tag") and args.check_tag:
+        if not args.check_tag.startswith("v"):
+            tag_check_failed = True
+            errors = True
+        else:
+            tag_version = args.check_tag.lstrip("v")
+            if consensus_version and consensus_version != "MISMATCH":
+                if consensus_version != tag_version:
+                    tag_check_failed = True
+                    tag_format_is_valid = True
+                    errors = True
+
     if errors:
         if len(versions_found) > 1:
             console.print(
-                f"\n[{STYLE_ERROR_STRONG}]FAILURE:[/{STYLE_ERROR_STRONG}] Found conflicting versions: {', '.join(sorted(versions_found))}"
+                f"\n[{STYLE_INFO}]Tip:[/{STYLE_INFO}] use --update-version X.Y.Z to set a single version across all files."
             )
+            console.print(
+                f"[{STYLE_ERROR_STRONG}]FAILURE:[/{STYLE_ERROR_STRONG}] version mismatch — conflicting versions: {', '.join(sorted(versions_found))}"
+            )
+        elif tag_check_failed:
+            if not tag_format_is_valid:
+                console.print(
+                    f"\n[{STYLE_ERROR_STRONG}]FAILURE:[/{STYLE_ERROR_STRONG}] Tag version ({args.check_tag}) format is invalid. It should start with 'v' and be a semantic version."
+                )
+            else:
+                console.print(
+                    f"\n[{STYLE_ERROR_STRONG}]FAILURE:[/{STYLE_ERROR_STRONG}] Tag version ({args.check_tag.lstrip('v')}) does not match consensus version ({consensus_version})."
+                )
         else:
             console.print(
-                f"\n[{STYLE_ERROR_STRONG}]FAILURE:[/{STYLE_ERROR_STRONG}] Errors encountered (parsing errors)."
+                f"\n[{STYLE_ERROR_STRONG}]FAILURE:[/{STYLE_ERROR_STRONG}] parsing errors encountered."
             )
-        return 1
+        return False
     elif not versions_found:
         console.print(
             f"\n[{STYLE_ERROR_STRONG}]FAILURE:[/{STYLE_ERROR_STRONG}] No version files found in {args.root}."
         )
-        return 1
+        return False
     else:
         if not args.short:
             console.print(
                 f"\n[{STYLE_SUCCESS_STRONG}]SUCCESS:[/{STYLE_SUCCESS_STRONG}] All files match version [{STYLE_SUCCESS}]{consensus_version}[/{STYLE_SUCCESS}]."
             )
-        return 0
+        return True
 
 
 def perform_version_updates(
@@ -992,7 +1530,7 @@ def perform_version_updates(
             try:
                 if dry_run:
                     curr = check.get_version()
-                    dry_run_rows.append((check.name, curr, target_version))
+                    dry_run_rows.append((check.label, curr, target_version))
                 else:
                     try:
                         old_version = check.get_version()
@@ -1001,20 +1539,20 @@ def perform_version_updates(
                     except Exception:
                         old_version = "?"
                     check.update_version(target_version)
-                    dry_run_rows.append((check.name, old_version, target_version))
+                    dry_run_rows.append((check.label, old_version, target_version))
                     line = Text()
-                    line.append(f"  {check.name:<22}", style="cyan")
+                    line.append(f"  {check.label:<28}", style="cyan")
                     line.append(old_version, style=STYLE_OLD_VALUE)
                     line.append("  →  ", style="dim")
                     line.append(target_version, style=STYLE_NEW_VALUE)
                     console.print(line)
-                updated_files.append(check.name)
+                updated_files.append(check.label)
                 updated_file_paths.append(str(check.file_path))
             except VersionNotPresent:
                 pass  # file exists but has no version configured; skip
             except Exception as e:
                 console.print(
-                    f"[{STYLE_ERROR}]Failed to update {check.name}: {e}[/{STYLE_ERROR}]"
+                    f"[{STYLE_ERROR}]Failed to update {check.label}: {e}[/{STYLE_ERROR}]"
                 )
                 if not dry_run:
                     failed = True
@@ -1037,14 +1575,14 @@ def show_dry_run_panel(
     console.print(f"  [dim]{'─' * 44}[/dim]")
     for name, old, new in dry_run_rows:
         line = Text()
-        line.append(f"  {name:<22}", style="cyan")
+        line.append(f"  {name:<28}", style="cyan")
         line.append(old, style=STYLE_OLD_VALUE)
         line.append("  →  ", style="dim")
         line.append(new, style=STYLE_NEW_VALUE)
         console.print(line)
     if pixi_lock_would_update:
         line = Text()
-        line.append(f"  {'pixi.lock':<22}", style="cyan")
+        line.append(f"  {'pixi.lock':<28}", style="cyan")
         line.append("regenerated via pixi list", style="dim")
         console.print(line)
 
@@ -1063,7 +1601,7 @@ def show_result_panel(
     """Display a polished summary of completed version updates."""
     if pixi_lock_updated:
         line = Text()
-        line.append(f"  {'pixi.lock':<22}", style="cyan")
+        line.append(f"  {'pixi.lock':<28}", style="cyan")
         line.append("regenerated via pixi list", style="dim")
         console.print(line)
     console.print()
@@ -1153,6 +1691,33 @@ def main():
         help="Custom git tag message. Use {version} as placeholder for version number. Default: 'Release version {version}'",
     )
     parser.add_argument(
+        "--sign-tag",
+        action="store_true",
+        help="GPG-sign the git tag (uses 'git tag -s' instead of '-a'). Requires a configured signing key (git config user.signingkey). Only meaningful with --git-tag.",
+    )
+    parser.add_argument(
+        "--push-tag",
+        action="store_true",
+        help="Push the tag to the main repository. Only works with github for now.",
+    )
+
+    parser.add_argument(
+        "--git-archive",
+        action="store_true",
+        help="Create a .tar.gz archive of the project with git",
+    )
+    parser.add_argument(
+        "--sign-archive",
+        action="store_true",
+        help="GPG-sign the git archive. Requires a configured signing key. Only meaningful with --git-archive.",
+    )
+    parser.add_argument(
+        "--gh-release",
+        action="store_true",
+        help="Create Github release. Requires a configured gh cli.",
+    )
+
+    parser.add_argument(
         "--short",
         action="store_true",
         help="Output only the final version string.",
@@ -1184,6 +1749,12 @@ def main():
         help="Bump the project version.",
     )
 
+    parser.add_argument(
+        "--check-tag",
+        type=str,
+        help="Check that the consensus version matches the given tag (e.g., v2.15.0). Only meaningful with --check-version.",
+    )
+
     args = parser.parse_args()
     root_dir = args.root
 
@@ -1193,6 +1764,9 @@ def main():
         console = Console(file=sys.stderr)
     else:
         console = Console()
+
+    if args.check_tag and not args.check_version:
+        parser.error("--check-tag requires --check-version")
 
     if args.update_version:
         try:
@@ -1207,14 +1781,7 @@ def main():
             )
             sys.exit(1)
 
-    checks: List[VersionExtractor] = [
-        XmlVersionExtractor(root_dir / "package.xml"),
-        TomlVersionExtractor(root_dir / "pyproject.toml", ["project", "version"]),
-        ChangelogVersionExtractor(root_dir / "CHANGELOG.md", r""),
-        TomlVersionExtractor(root_dir / "pixi.toml", ["workspace", "version"]),
-        YamlVersionExtractor(root_dir / "CITATION.cff", ["version"]),
-        CMakeListsVersionExtractor(root_dir / "CMakeLists.txt"),
-    ]
+    checks: List[VersionExtractor] = collect_version_checks(root_dir)
 
     if args.list_files:
         if args.output_format == "json":
@@ -1222,7 +1789,7 @@ def main():
             for check in checks:
                 files_list.append(
                     {
-                        "name": check.name,
+                        "name": check.label,
                         "path": str(check.file_path),
                         "exists": check.check_file_exists(),
                         "type": check.__class__.__name__.replace(
@@ -1236,14 +1803,15 @@ def main():
         sys.exit(0)
 
     if args.check_version:
-        sys.exit(handle_check_version(checks, args))
+        sys.exit(0 if handle_check_version(checks, args) else 1)
 
     current_version = None
     new_version_str = None
 
     if args.update_version:
         new_version_str = args.update_version
-        current_version = get_current_version(checks)
+        versions, _ = collect_versions(checks)
+        current_version = next(iter(versions)) if len(versions) == 1 else None
         if not args.dry_run:
             console.print(
                 f"[{STYLE_INFO}]Updating versions to {new_version_str} in {root_dir}...[/{STYLE_INFO}]"
@@ -1358,6 +1926,22 @@ def main():
     elif args.short:
         print(target_version)
 
+    project_url = ""
+    archive_name = ""
+    if args.push_tag:
+        for check in checks:
+            if url := check.get_url():
+                project_url = url
+                break
+        else:
+            where = "CMakeLists.txt, package.xml, or pyproject.toml"
+            console.print(
+                f"[{STYLE_ERROR_STRONG}]Error: can't push tag without a github homepage in {where}.[/{STYLE_ERROR_STRONG}]"
+            )
+            sys.exit(1)
+        if args.git_archive:
+            archive_name = f"{project_url.split('/')[-1]}-{target_version}.tar.gz"
+
     if args.dry_run:
         pixi_lock_would_update = (root_dir / "pixi.lock").exists()
 
@@ -1376,6 +1960,7 @@ def main():
             )
             git_lines.append(f"$ git add {' '.join(rel_paths) if rel_paths else '-u'}")
             git_lines.append(f"$ git commit -m '{commit_message}'")
+
         if args.git_tag is not None:
             custom_tag_name = None if args.git_tag is True else args.git_tag
             tag_name = (
@@ -1388,7 +1973,32 @@ def main():
                 if args.git_tag_message
                 else f"Release version {target_version}"
             )
-            git_lines.append(f"$ git tag -a {tag_name} -m '{tag_message}'")
+            tag_flag = "-s" if args.sign_tag else "-a"
+            git_lines.append(f"$ git tag {tag_flag} {tag_name} -m '{tag_message}'")
+            if args.push_tag:
+                url = project_url.replace(GITHUB_URL, "git@github.com:")
+                git_lines.append(f"$ git push {url} {tag_name}")
+
+        if args.git_archive:
+            git_lines.append(
+                f"$ git archive --format tgz --output {archive_name} {tag_name}"
+            )
+
+            if args.sign_archive:
+                git_lines.append(
+                    f"$ gpg --detach-sign --armor -o {archive_name}.sig {archive_name}"
+                )
+
+        if args.gh_release:
+            _, call = gh_release(
+                root_dir,
+                target_version,
+                project_url,
+                archive_name,
+                args.sign_archive,
+                dry_run=True,
+            )
+            git_lines.append(call)
 
         show_dry_run_panel(dry_run_rows, pixi_lock_would_update, git_lines)
         sys.exit(0)
@@ -1402,6 +2012,36 @@ def main():
                 f"[{STYLE_WARNING}]Warning: --git-tag used without --git-commit. The tag will point to the current HEAD, not the version bump commit.[/{STYLE_WARNING}]"
             )
 
+        if args.sign_tag and args.git_tag is None:
+            console.print(
+                f"[{STYLE_WARNING}]Warning: --sign-tag has no effect without --git-tag.[/{STYLE_WARNING}]"
+            )
+
+        if args.gh_release and not args.push_tag:
+            console.print(
+                f"[{STYLE_WARNING}]Warning: --gh-release has no effect without --push-tag.[/{STYLE_WARNING}]"
+            )
+
+        if args.sign_archive and args.git_archive is None:
+            console.print(
+                f"[{STYLE_WARNING}]Warning: --sign-archive has no effect without --git-archive.[/{STYLE_WARNING}]"
+            )
+
+        if args.git_archive and (root_dir / archive_name).is_file():
+            console.print(
+                f"[{STYLE_WARNING_STRONG}]Warning: {archive_name} already exists ![/{STYLE_WARNING_STRONG}]"
+            )
+            if Confirm.ask(
+                "[bold]Remove this file (and the .sig if it is also there) and continue ?[/bold]",
+                default=True,
+            ):
+                (root_dir / archive_name).unlink()
+                sig = root_dir / f"{archive_name}.sig"
+                if sig.is_file():
+                    sig.unlink()
+            else:
+                sys.exit(1)
+
         if args.git_commit is not None:
             custom_message = None if args.git_commit is True else args.git_commit
             git_commit_version(
@@ -1414,13 +2054,44 @@ def main():
 
         if args.git_tag is not None:
             custom_tag_name = None if args.git_tag is True else args.git_tag
-            git_tag_version(
+            _success, tag_name = git_tag_version(
                 root_dir,
                 target_version,
                 args.confirm,
                 custom_tag_name,
                 args.git_tag_message,
+                args.sign_tag,
             )
+
+            if args.push_tag:
+                success = push_tag(root_dir, tag_name, project_url)
+                if not success:
+                    sys.exit(1)
+
+        if args.git_archive and archive_name:
+            success = git_archive(root_dir, archive_name, tag_name, args.sign_archive)
+            if not success:
+                sys.exit(1)
+
+        if args.gh_release:
+            if args.git_tag is None:
+                console.print(
+                    f"[{STYLE_WARNING}]Warning: --gh-release has no effect without --git-tag.[/{STYLE_WARNING}]"
+                )
+            elif not args.push_tag:
+                console.print(
+                    f"[{STYLE_WARNING}]Warning: --gh-release has no effect without --push-tag.[/{STYLE_WARNING}]"
+                )
+            else:
+                success, _ = gh_release(
+                    root_dir,
+                    target_version,
+                    project_url,
+                    archive_name,
+                    args.sign_archive,
+                )
+                if not success:
+                    sys.exit(1)
 
 
 if __name__ == "__main__":
