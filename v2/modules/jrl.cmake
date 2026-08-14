@@ -549,10 +549,16 @@ message(STATUS "jrl-cmakemodules commit: ${commit}")
 ```
 #]============================================================================]
 function(jrl_cmakemodules_get_commit output_var)
+    if(DEFINED CACHE{_JRL_COMMIT})
+        set(${output_var} "${_JRL_COMMIT}" PARENT_SCOPE)
+        return()
+    endif()
+
     find_program(GIT git QUIET)
 
     if(NOT GIT)
         message(DEBUG "Git executable not found, cannot get jrl-cmakemodules commit hash.")
+        set(_JRL_COMMIT "" CACHE INTERNAL "Cached commit hash of jrl-cmakemodules")
         return()
     endif()
 
@@ -567,10 +573,12 @@ function(jrl_cmakemodules_get_commit output_var)
     # It might not be a git repository (e.g. downloaded zip archive)
     if(NOT git_commit)
         message(DEBUG "Could not get jrl-cmakemodules commit hash.")
+        set(_JRL_COMMIT "" CACHE INTERNAL "Cached commit hash of jrl-cmakemodules")
         return()
     endif()
 
-    set(${output_var} ${git_commit} PARENT_SCOPE)
+    set(_JRL_COMMIT "${git_commit}" CACHE INTERNAL "Cached commit hash of jrl-cmakemodules")
+    set(${output_var} "${git_commit}" PARENT_SCOPE)
 endfunction()
 
 #[============================================================================[
@@ -605,11 +613,8 @@ function(jrl_print_banner)
 
     message(
         STATUS
-        "
-        🚧 Welcome to JRL CMake Modules v${v} ${commit_msg}
-        🚧 Loaded from: ${CMAKE_CURRENT_FUNCTION_LIST_FILE}
-        🚧 This v2 API is still under heavy development.
-        🚧 API may change without notice.
+        "JRL CMake Modules v${v} ${commit_msg}
+   Loaded from: ${CMAKE_CURRENT_FUNCTION_LIST_FILE}
     "
     )
 endfunction()
@@ -676,11 +681,17 @@ endfunction()
 jrl_configure_default_binary_dirs()
 ```
 
-**Type:** function
+**Type:** macro
 
 
 ### Description
-  Configures the default output directory for binaries and libraries.
+  Configures the default output directory for binaries and libraries to
+  `${CMAKE_BINARY_DIR}/bin` and `${CMAKE_BINARY_DIR}/lib`.
+  Implemented as a macro setting plain (non-cache) variables: it must be
+  called directly from a project's `CMakeLists.txt` (not wrapped in a
+  `function()`, or the variables it sets are lost), and it does not leak into
+  a project that embeds this one via `add_subdirectory()`/`FetchContent`.
+  Calling it from inside a `function()` throws an error.
 
 
 ### Arguments
@@ -692,30 +703,30 @@ jrl_configure_default_binary_dirs()
 jrl_configure_default_binary_dirs()
 ```
 #]============================================================================]
-function(jrl_configure_default_binary_dirs)
+macro(jrl_configure_default_binary_dirs)
+    if(DEFINED CMAKE_CURRENT_FUNCTION)
+        message(
+            FATAL_ERROR
+            "jrl_configure_default_binary_dirs() must be called directly from a CMakeLists.txt, not from inside function '${CMAKE_CURRENT_FUNCTION}()'.
+            the output directories it sets would be lost when that function returns.
+            "
+        )
+    endif()
+
     # doc: https://cmake.org/cmake/help/v3.22/manual/cmake-buildsystem.7.html#id47
-    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin CACHE PATH "") # For Unix/MacOS executables, Windows: .exe, .dll, .pyd
-    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib CACHE PATH "") # for Unix/MacOS shared libraries .so/.dylib and Windows: .lib (import libraries for shared libraries)
-    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib CACHE PATH "") # For static libraries add_library(STATIC ...) .a and Windows: .lib
-    mark_as_advanced(
-        CMAKE_RUNTIME_OUTPUT_DIRECTORY
-        CMAKE_LIBRARY_OUTPUT_DIRECTORY
-        CMAKE_ARCHIVE_OUTPUT_DIRECTORY
-    )
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin) # For Unix/MacOS executables, Windows: .exe, .dll, .pyd
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib) # for Unix/MacOS shared libraries .so/.dylib and Windows: .lib (import libraries for shared libraries)
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib) # For static libraries add_library(STATIC ...) .a and Windows: .lib
     # /!\ MODULE libraries are dynamic libraries. On Windows, python modules are MODULE libraries, with pyd extension.
     #     They should be placed explicitely in lib/site-packages when building python extensions.
-    foreach(config Debug Release MinSizeRel RelWithDebInfo)
-        string(TOUPPER ${config} config)
-        set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${config} ${CMAKE_BINARY_DIR}/bin CACHE PATH "")
-        set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${config} ${CMAKE_BINARY_DIR}/lib CACHE PATH "")
-        set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${config} ${CMAKE_BINARY_DIR}/lib CACHE PATH "")
-        mark_as_advanced(
-            CMAKE_RUNTIME_OUTPUT_DIRECTORY_${config}
-            CMAKE_LIBRARY_OUTPUT_DIRECTORY_${config}
-            CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${config}
-        )
+    foreach(_jrl_config Debug Release MinSizeRel RelWithDebInfo)
+        string(TOUPPER ${_jrl_config} _jrl_config)
+        set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${_jrl_config} ${CMAKE_BINARY_DIR}/bin)
+        set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${_jrl_config} ${CMAKE_BINARY_DIR}/lib)
+        set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${_jrl_config} ${CMAKE_BINARY_DIR}/lib)
     endforeach()
-endfunction()
+    unset(_jrl_config)
+endmacro()
 
 #[============================================================================[
 # `jrl_target_set_output_directory`
@@ -785,12 +796,16 @@ endfunction()
 jrl_configure_default_install_dirs()
 ```
 
-**Type:** function
+**Type:** macro
 
 
 ### Description
   Configures the default install directories using GNUInstallDirs (bin, lib, include, etc.).
   Works on all platforms.
+
+  Must be called directly from a project's `CMakeLists.txt`, not wrapped in a `function()`:
+  `CMAKE_INSTALL_DOCDIR`, `DATADIR`, `MANDIR`, `INFODIR`, `LOCALEDIR` and every
+  `CMAKE_INSTALL_FULL_*` are not cache entries and would be lost when the function returns.
 
 
 ### Arguments
@@ -802,19 +817,37 @@ jrl_configure_default_install_dirs()
 jrl_configure_default_install_dirs()
 ```
 #]============================================================================]
-function(jrl_configure_default_install_dirs)
+macro(jrl_configure_default_install_dirs)
+    if(DEFINED CMAKE_CURRENT_FUNCTION)
+        message(
+            FATAL_ERROR
+            "jrl_configure_default_install_dirs() must be called directly from a CMakeLists.txt, not from inside function '${CMAKE_CURRENT_FUNCTION}()'.
+            The GNUInstallDirs variables that are not cache entries (CMAKE_INSTALL_DOCDIR, DATADIR, MANDIR,
+            INFODIR, LOCALEDIR and all CMAKE_INSTALL_FULL_*) would be lost when that function returns.
+            "
+        )
+    endif()
+
     # Prevent the following warning on pure-cmake projects (i.e. defined with LANGUAGES NONE, like jrl-cmakemodules):
     # "Unable to determine default CMAKE_INSTALL_LIBDIR directory because no target architecture is known.
     # Please enable at least one language before including GNUInstallDirs"
     # ref: https://github.com/Kitware/CMake/blob/v4.2.3/Modules/GNUInstallDirs.cmake#L434C8-L435C75
     # issue: https://gitlab.kitware.com/cmake/cmake/-/issues/23461
-
-    if(NOT DEFINED CMAKE_SIZEOF_VOID_P)
+    if(DEFINED CMAKE_SIZEOF_VOID_P)
+        set(_cmake_sizeof_already_defined false)
+    else()
+        set(_cmake_sizeof_already_defined true)
         set(CMAKE_SIZEOF_VOID_P 0)
     endif()
 
     include(GNUInstallDirs)
-endfunction()
+
+    # Do not leak the placeholder: a defined-but-0 value is worse than an undefined one.
+    if(_cmake_sizeof_already_defined)
+        unset(CMAKE_SIZEOF_VOID_P)
+    endif()
+    unset(_cmake_sizeof_already_defined)
+endmacro()
 
 #[============================================================================[
 # `jrl_configure_default_install_prefix`
@@ -901,17 +934,19 @@ endfunction()
 jrl_configure_defaults()
 ```
 
-**Type:** function
+**Type:** macro
 
 
 ### Description
   Setup the default options for a project (opinionated defaults).
   * Default build type: Release
-  * Default binary directories: ${CMAKE_BINARY_DIR}/bin and ${CMAKE_BINARY_DIR}/lib (top-level, allows for superbuilds)
+  * Default binary directories: ${CMAKE_BINARY_DIR}/bin and ${CMAKE_BINARY_DIR}/lib
   * Default install directories: via GNUInstallDirs (bin, lib, include, etc.)
   * Default install prefix: ${CMAKE_BINARY_DIR}/install
   * Copy compile_commands.json to source directory for clangd support (only if the build directory is not <source_dir>/build)
   * Add a `uninstall` target to uninstall the project.
+
+  Must be called directly from a project's `CMakeLists.txt`, not wrapped in a `function()`. See `jrl_configure_default_binary_dirs`.
 
 
 ### Arguments
@@ -923,14 +958,15 @@ jrl_configure_defaults()
 jrl_configure_defaults()
 ```
 #]============================================================================]
-function(jrl_configure_defaults)
+macro(jrl_configure_defaults)
     jrl_configure_default_build_type(Release)
     jrl_configure_default_binary_dirs()
-    jrl_configure_default_install_dirs()
+    # Before install_dirs: GNUInstallDirs derives CMAKE_INSTALL_FULL_* from the prefix, once.
     jrl_configure_default_install_prefix(${CMAKE_BINARY_DIR}/install)
+    jrl_configure_default_install_dirs()
     jrl_configure_copy_compile_commands_in_source_dir()
     jrl_configure_uninstall_target()
-endfunction()
+endmacro()
 
 #[============================================================================[
 # `jrl_get_cxx_compiler_id`
@@ -2173,35 +2209,155 @@ function(_jrl_export_dependencies)
         set(INSTALL_DESTINATION lib/cmake/${PROJECT_NAME})
     endif()
 
-    # Gather the interface link libraries of all targets present in the export component.
-    # It contains external libraries but also buildsystem target, with or without generator expressions.
-    set(all_interface_link_libraries "")
+    # Collect target interface link libraries (external libs and targets, including generator expressions).
+    #
+    # CMake's standard evaluator expands $<BUILD_INTERFACE:...> and discards $<INSTALL_INTERFACE:...>.
+    # Because of this, file(GENERATE) defaults to build-tree view rather than the installed package view.
+    # To force file(GENERATE) to evaluate the install tree, swap the interface markers to $<1:...>
+    # and $<0:...> while keeping nested generator expression syntax intact.
+    # Unfortunately we need to manually parse the generator expressions, but the expressions are
+    # simple enough to be handled with string(REPLACE).
+
+    # Mark $<LINK_LIBRARY:...> parameters for configure_file() to pass into the install script.
+    set(LINK_LIBRARY_MARKER "_jrl_link_library_feature_")
+
+    # Names of the files written by the file(GENERATE) below, listed for the install script.
+    # Naming them instead of globbing keeps what an earlier configure left in GEN_DIR, a
+    # renamed target or another build type, out of the way.
+    set(INTERFACE_LINK_LIBRARIES_FILES "")
+
     foreach(target ${arg_TARGETS})
         get_target_property(interface_link_libraries ${target} INTERFACE_LINK_LIBRARIES)
 
         if(NOT interface_link_libraries)
             message(DEBUG "Target '${target}' has no INTERFACE_LINK_LIBRARIES.")
-            continue()
+            set(interface_link_libraries "")
         endif()
 
-        list(APPEND all_interface_link_libraries ${interface_link_libraries})
-    endforeach()
+        # CMake writes $<LINK_ONLY:> itself for the private dependencies of a static
+        # library, $<COMPILE_ONLY:> for the compile-only ones. Both need a link or compile
+        # context, which file(GENERATE) has not. A consumer uses their content, so $<1:>.
+        string(
+            REPLACE "\$<LINK_ONLY:"
+            "\$<1:"
+            interface_link_libraries
+            "${interface_link_libraries}"
+        )
+        string(
+            REPLACE "\$<COMPILE_ONLY:"
+            "\$<1:"
+            interface_link_libraries
+            "${interface_link_libraries}"
+        )
 
-    list(REMOVE_DUPLICATES all_interface_link_libraries)
+        # Handle $<LINK_LIBRARY:...> and $<LINK_GROUP:...> expressions, where the first argument
+        # is a link feature rather than a library name.
+        #
+        # Wrapping the parameters in $<1:...> preserves the comma-separated list as a single
+        # token during CMake evaluation. The marker signals the install script to split the
+        # list and strip the feature parameter.
+        string(
+            REPLACE "\$<LINK_LIBRARY:"
+            "\$<1:${LINK_LIBRARY_MARKER}"
+            interface_link_libraries
+            "${interface_link_libraries}"
+        )
+        string(
+            REPLACE "\$<LINK_GROUP:"
+            "\$<1:${LINK_LIBRARY_MARKER}"
+            interface_link_libraries
+            "${interface_link_libraries}"
+        )
+
+        string(
+            REPLACE "\$<BUILD_LOCAL_INTERFACE:"
+            "\$<0:"
+            interface_link_libraries
+            "${interface_link_libraries}"
+        )
+        string(
+            REPLACE "\$<BUILD_INTERFACE:"
+            "\$<0:"
+            interface_link_libraries
+            "${interface_link_libraries}"
+        )
+        string(
+            REPLACE "\$<INSTALL_INTERFACE:"
+            "\$<1:"
+            interface_link_libraries
+            "${interface_link_libraries}"
+        )
+
+        # The consumer resolves these, in its own configuration and link language, and the
+        # last two need a link context. Export the union of both answers: an unused
+        # find_dependency() beats a missing target.
+        #
+        # $<CONFIG:$<CONFIG>,...> lists the current configuration, so it is always 1.
+        # A configuration or language name is never a platform id, so $<PLATFORM_ID:...>
+        # is always 0. Both take any number of parameters, $<BOOL:> and $<STREQUAL:> do not.
+        set(condition_matches "${interface_link_libraries}")
+        set(condition_does_not_match "${interface_link_libraries}")
+        foreach(condition "\$<CONFIG:" "\$<LINK_LANGUAGE:" "\$<LINK_LANG_AND_ID:")
+            string(
+                REPLACE "${condition}"
+                "\$<CONFIG:\$<CONFIG>,"
+                condition_matches
+                "${condition_matches}"
+            )
+            string(
+                REPLACE "${condition}"
+                "\$<PLATFORM_ID:"
+                condition_does_not_match
+                "${condition_does_not_match}"
+            )
+        endforeach()
+
+        # Use file(GENERATE) instead of file(WRITE) to force generator expression evaluation.
+        # Explicitly setting TARGET is required so target-dependent generator expressions
+        # (e.g., $<TARGET_PROPERTY:...>, $<CXX_COMPILER_ID:...>) have context to evaluate.
+        #
+        # Generate one file per target and configuration to accommodate multi-config
+        # generators where expressions vary across configurations.
+        file(
+            GENERATE OUTPUT ${GEN_DIR}/interface-link-libraries-${target}-$<CONFIG>.cmake
+            CONTENT
+                "
+# Generated file - do not edit
+# Link libraries of target '${target}', as a consumer of the installed package sees them.
+list(APPEND all_interface_link_libraries \"${condition_matches}\" \"${condition_does_not_match}\")
+"
+            TARGET ${target}
+        )
+
+        # file(GENERATE) writes one file per configuration: the CMAKE_CONFIGURATION_TYPES
+        # entries for a multi-config generator, CMAKE_BUILD_TYPE otherwise. An empty
+        # CMAKE_BUILD_TYPE is valid, $<CONFIG> then expands to nothing.
+        if(CMAKE_CONFIGURATION_TYPES)
+            foreach(config IN LISTS CMAKE_CONFIGURATION_TYPES)
+                list(
+                    APPEND INTERFACE_LINK_LIBRARIES_FILES
+                    interface-link-libraries-${target}-${config}.cmake
+                )
+            endforeach()
+        else()
+            list(
+                APPEND INTERFACE_LINK_LIBRARIES_FILES
+                interface-link-libraries-${target}-${CMAKE_BUILD_TYPE}.cmake
+            )
+        endif()
+    endforeach()
 
     # Get the complete list of exported targets
     # This is used to filter out the INTERFACE_LINK_LIBRARIES that are actually part of the same package
     # (and should not be added as dependencies in the generated <export_name>-dependencies.cmake file)
+    # Namespaced names are listed too, $<INSTALL_INTERFACE:> entries usually use them.
     set(all_exported_targets "")
     foreach(component ${declared_components})
         get_property(targets GLOBAL PROPERTY _jrl_${PROJECT_NAME}_${component}_targets)
-        list(APPEND all_exported_targets ${targets})
+        foreach(target ${targets})
+            list(APPEND all_exported_targets ${target} ${PROJECT_NAME}::${target})
+        endforeach()
     endforeach()
-
-    message(
-        DEBUG
-        "All interface link libraries for targets '${arg_TARGETS}': ${all_interface_link_libraries}"
-    )
 
     # Get the list of external dependencies recorded with jrl_find_package() and jrl_export_dependency()
     get_property(
@@ -2214,24 +2370,20 @@ function(_jrl_export_dependencies)
         message(DEBUG "No package dependencies recorded with jrl_find_package()")
     endif()
 
+    # file(WRITE) and not file(GENERATE): nothing here needs to be evaluated, and
+    # file(GENERATE) would expand any generator expression found in those values.
     file(
-        GENERATE OUTPUT ${GEN_DIR}/imported-libraries.cmake
-        CONTENT
-            "
+        WRITE ${GEN_DIR}/imported-libraries.cmake
+        "
 # Generated file - do not edit
 set(component_name [[${arg_COMPONENT}]])
 set(all_exported_targets [[${all_exported_targets}]])
-
-# The targets declared via jrl_add_export_component(NAME ${arg_COMPONENT} TARGETS ${arg_TARGETS})
-set(export_component_targets [[${arg_TARGETS}]])
-
-# The resolved list of all interface link libraries the targets above, after generator expression evaluation.
-set(all_interface_link_libraries [[${all_interface_link_libraries}]])
 
 # The list of external dependencies recorded via jrl_find_package()
 set(package_dependencies_json_content [[${package_dependencies_json_content}]])
 "
     )
+
     # needs @INSTALL_DESTINATION@
     configure_file(
         ${_JRL_TEMPLATES_DIR}/generate-dependencies.cmake.in
@@ -2334,7 +2486,7 @@ jrl_target_headers(
   Declare headers for target to be installed later.
   * This function does not target_include_directories(), only stores them for installation.
   * Only PUBLIC and INTERFACE will be installed.
-  * It populates the _jrl_install_headers and _jrl_install_headers_base_dirs properties of the target.
+  * Each call is recorded as an object in the _jrl_install_headers_json target property, replayed by jrl_target_install_headers().
   * In CMake 3.23, we will use FILE_SETS instead of this trick.
   cf: https://cmake.org/cmake/help/latest/command/target_sources.html#file-sets
 
@@ -2375,8 +2527,23 @@ function(jrl_target_headers target visibility)
         )
         return()
     endif()
-    set_property(TARGET ${target} APPEND PROPERTY _jrl_install_headers "${arg_HEADERS}")
-    set_property(TARGET ${target} APPEND PROPERTY _jrl_install_headers_base_dirs "${arg_BASE_DIRS}")
+    # Record this call as an object in a JSON array on the target so each header keeps its own source dir and base dirs.
+    get_target_property(headers_json ${target} _jrl_install_headers_json)
+    if(NOT headers_json)
+        string(JSON headers_json SET "{}" "records" "[]")
+    endif()
+
+    # Save the information about this call in a json object.
+    set(record "{}")
+    string(JSON record SET "${record}" "source_dir" "\"${CMAKE_CURRENT_SOURCE_DIR}\"")
+    string(JSON record SET "${record}" "headers" "\"${arg_HEADERS}\"")
+    string(JSON record SET "${record}" "base_dirs" "\"${arg_BASE_DIRS}\"")
+
+    # Append the record to the "records" array.
+    string(JSON records_length LENGTH "${headers_json}" "records")
+    string(JSON headers_json SET "${headers_json}" "records" ${records_length} "${record}")
+
+    set_property(TARGET ${target} PROPERTY _jrl_install_headers_json "${headers_json}")
 endfunction()
 
 #[============================================================================[
@@ -2394,7 +2561,7 @@ jrl_target_install_headers(
 
 ### Description
   Install declared header for a given target and solve the relative path using the provided base dirs.
-  It is using the _jrl_install_headers and _jrl_install_headers_base_dirs properties set via jrl_target_headers().
+  It replays the per-call records stored as a JSON array in the _jrl_install_headers_json property set via jrl_target_headers().
   For a whole project, use jrl_install_headers() instead (which calls this function for each component, that contains targets).
   NOTE: this is done automatically in jrl_export_package() for all exported targets.
 
@@ -2425,22 +2592,31 @@ function(jrl_target_install_headers target)
         set(install_destination ${CMAKE_INSTALL_INCLUDEDIR})
     endif()
 
-    get_target_property(headers ${target} _jrl_install_headers)
-    get_target_property(base_dirs ${target} _jrl_install_headers_base_dirs)
+    get_target_property(headers_json ${target} _jrl_install_headers_json)
 
-    if(NOT headers)
+    if(NOT headers_json)
         message(DEBUG "No headers declared for target '${target}'. Skipping installation.")
         return()
     endif()
 
-    install(
-        CODE
-            "
+    # Replay each recorded call as its own install block (see jrl_target_headers).
+    string(JSON num_records LENGTH "${headers_json}" "records")
+    math(EXPR max_idx "${num_records} - 1")
+    foreach(record_index RANGE 0 ${max_idx})
+        string(JSON current_source_dir GET "${headers_json}" "records" ${record_index} "source_dir")
+        string(JSON headers GET "${headers_json}" "records" ${record_index} "headers")
+        string(JSON base_dirs GET "${headers_json}" "records" ${record_index} "base_dirs")
+
+        install(
+            CODE
+                "
 # Generated file - do not edit
-# This file contains the list of headers declared for target '${target}' with visibility '${visibility}'
+# Headers declared for target '${target}' (record ${record_index})
 set(headers \"${headers}\")
 set(base_dirs \"${base_dirs}\")
 foreach(header \${headers})
+    set(relative_header_path \"\")
+    set(header_dir \"\")
     foreach(base_dir \${base_dirs})
         string(FIND \${header} \${base_dir} pos)
         if(pos EQUAL 0)
@@ -2453,7 +2629,7 @@ foreach(header \${headers})
     if(IS_ABSOLUTE \${header})
         set(header_path \${header})
     else()
-        set(header_path ${CMAKE_CURRENT_SOURCE_DIR}/\${header})
+        set(header_path ${current_source_dir}/\${header})
     endif()
 
     if(relative_header_path)
@@ -2475,7 +2651,8 @@ foreach(header \${headers})
     endif()
 endforeach()
 "
-    )
+        )
+    endforeach()
 endfunction()
 
 #[============================================================================[
@@ -2731,13 +2908,6 @@ function(jrl_export_package)
             jrl_target_install_headers(${target} DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
         endforeach()
 
-        # <package>/<component>/dependencies.cmake
-        _jrl_export_dependencies(
-            COMPONENT ${component}
-            TARGETS ${targets}
-            GEN_DIR ${GEN_DIR}/${component}
-            INSTALL_DESTINATION ${cmake_files_install_dir}/${component}
-        )
         # Create the export for the component targets
         # AND the install rules for the targets (see jrl_add_export_component() comment)
         install(
@@ -2753,6 +2923,13 @@ function(jrl_export_package)
             FILE targets.cmake
             NAMESPACE ${PACKAGE_NAMESPACE}
             DESTINATION ${cmake_files_install_dir}/${component}
+        )
+        # <package>/<component>/dependencies.cmake
+        _jrl_export_dependencies(
+            COMPONENT ${component}
+            TARGETS ${targets}
+            GEN_DIR ${GEN_DIR}/${component}
+            INSTALL_DESTINATION ${cmake_files_install_dir}/${component}
         )
     endforeach()
 endfunction()
@@ -3630,7 +3807,8 @@ jrl_check_python_module(
 
 ### Description
   Find if a python module is available, fills <module_name>_FOUND variable.
-  Also fills <module_name>_VERSION variable if the module has a __version__ attribute.
+  Also fills <module_name>_VERSION variable if the module has a __version__ attribute,
+  falling back to importlib.metadata.version(<module_name>) otherwise.
   Displays messages based on REQUIRED and QUIET options.
 
 
@@ -3663,6 +3841,24 @@ function(jrl_check_python_module module_name)
         ERROR_QUIET
         OUTPUT_STRIP_TRAILING_WHITESPACE
     )
+
+    # Fallback: some modules do not expose a __version__ attribute, ask the
+    # package metadata instead (works only if the distribution name matches
+    # the module name).
+    if(module_found STREQUAL 0 AND NOT module_version)
+        execute_process(
+            COMMAND
+                ${python} -c
+                "import importlib.metadata; print(importlib.metadata.version('${module_name}'), end='')"
+            RESULT_VARIABLE metadata_found
+            OUTPUT_VARIABLE metadata_version
+            ERROR_QUIET
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        if(metadata_found STREQUAL 0)
+            set(module_version "${metadata_version}")
+        endif()
+    endif()
 
     if(module_found STREQUAL 0)
         set(${module_name}_FOUND true PARENT_SCOPE)
