@@ -164,11 +164,17 @@ jrl_configure_default_build_type(RelWithDebInfo)
 jrl_configure_default_binary_dirs()
 ```
 
-**Type:** function
+**Type:** macro
 
 
 ### Description
-  Configures the default output directory for binaries and libraries.
+  Configures the default output directory for binaries and libraries to
+  `${CMAKE_BINARY_DIR}/bin` and `${CMAKE_BINARY_DIR}/lib`.
+  Implemented as a macro setting plain (non-cache) variables: it must be
+  called directly from a project's `CMakeLists.txt` (not wrapped in a
+  `function()`, or the variables it sets are lost), and it does not leak into
+  a project that embeds this one via `add_subdirectory()`/`FetchContent`.
+  Calling it from inside a `function()` throws an error.
 
 
 ### Arguments
@@ -213,12 +219,16 @@ jrl_target_set_output_directory(my_python_module_target OUTPUT_DIRECTORY ${CMAKE
 jrl_configure_default_install_dirs()
 ```
 
-**Type:** function
+**Type:** macro
 
 
 ### Description
   Configures the default install directories using GNUInstallDirs (bin, lib, include, etc.).
   Works on all platforms.
+
+  Must be called directly from a project's `CMakeLists.txt`, not wrapped in a `function()`:
+  `CMAKE_INSTALL_DOCDIR`, `DATADIR`, `MANDIR`, `INFODIR`, `LOCALEDIR` and every
+  `CMAKE_INSTALL_FULL_*` are not cache entries and would be lost when the function returns.
 
 
 ### Arguments
@@ -279,17 +289,19 @@ jrl_configure_uninstall_target()
 jrl_configure_defaults()
 ```
 
-**Type:** function
+**Type:** macro
 
 
 ### Description
   Setup the default options for a project (opinionated defaults).
   * Default build type: Release
-  * Default binary directories: ${CMAKE_BINARY_DIR}/bin and ${CMAKE_BINARY_DIR}/lib (top-level, allows for superbuilds)
+  * Default binary directories: ${CMAKE_BINARY_DIR}/bin and ${CMAKE_BINARY_DIR}/lib
   * Default install directories: via GNUInstallDirs (bin, lib, include, etc.)
   * Default install prefix: ${CMAKE_BINARY_DIR}/install
   * Copy compile_commands.json to source directory for clangd support (only if the build directory is not <source_dir>/build)
   * Add a `uninstall` target to uninstall the project.
+
+  Must be called directly from a project's `CMakeLists.txt`, not wrapped in a `function()`. See `jrl_configure_default_binary_dirs`.
 
 
 ### Arguments
@@ -722,7 +734,7 @@ jrl_target_headers(
   Declare headers for target to be installed later.
   * This function does not target_include_directories(), only stores them for installation.
   * Only PUBLIC and INTERFACE will be installed.
-  * It populates the _jrl_install_headers and _jrl_install_headers_base_dirs properties of the target.
+  * Each call is recorded as an object in the _jrl_install_headers_json target property, replayed by jrl_target_install_headers().
   * In CMake 3.23, we will use FILE_SETS instead of this trick.
   cf: https://cmake.org/cmake/help/latest/command/target_sources.html#file-sets
 
@@ -752,7 +764,7 @@ jrl_target_install_headers(
 
 ### Description
   Install declared header for a given target and solve the relative path using the provided base dirs.
-  It is using the _jrl_install_headers and _jrl_install_headers_base_dirs properties set via jrl_target_headers().
+  It replays the per-call records stored as a JSON array in the _jrl_install_headers_json property set via jrl_target_headers().
   For a whole project, use jrl_install_headers() instead (which calls this function for each component, that contains targets).
   NOTE: this is done automatically in jrl_export_package() for all exported targets.
 
@@ -1125,7 +1137,8 @@ jrl_check_python_module(
 
 ### Description
   Find if a python module is available, fills <module_name>_FOUND variable.
-  Also fills <module_name>_VERSION variable if the module has a __version__ attribute.
+  Also fills <module_name>_VERSION variable if the module has a __version__ attribute,
+  falling back to importlib.metadata.version(<module_name>) otherwise.
   Displays messages based on REQUIRED and QUIET options.
 
 
