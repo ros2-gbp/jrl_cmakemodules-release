@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-08-21
+
+- jrl_release: add package.xml by @nim65s
+- jrl_release: add --version by @nim65s
+- jrl_check_python_module: add version handling by @ahoarau
+- jrl_option: fix condition handling on reconfigure and support parent project normal variables (CMP0077)
+- v2: add cppad, cppadcg, GMP and MPFR find-modules by @ahoarau
+
 ## [2.2.4] - 2026-08-07
 
 - fix pypi release for 2.2.4
@@ -70,7 +78,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 First release
 
 
-[Unreleased]: https://github.com/coal-library/coal/compare/v2.2.4...HEAD
+[Unreleased]: https://github.com/coal-library/coal/compare/v2.3.0...HEAD
+[2.3.0]: https://github.com/coal-library/coal/compare/v2.2.4...v2.3.0
 [2.2.4]: https://github.com/coal-library/coal/compare/v2.2.3...v2.2.4
 [2.2.3]: https://github.com/coal-library/coal/compare/v2.2.2...v2.2.3
 [2.2.2]: https://github.com/coal-library/coal/compare/v2.2.1...v2.2.2
