@@ -1,4 +1,4 @@
-From 6021b9bc9b93a46c06453fe4a941abd80f39a35b Mon Sep 17 00:00:00 2001
+From 76c69b075c53026e8cb9da8162535846621b0ea5 Mon Sep 17 00:00:00 2001
 From: Guilhem Saurel <guilhem.saurel@laas.fr>
 Date: Thu, 6 Nov 2025 16:50:49 +0100
 Subject: [PATCH] dont build doc by default
