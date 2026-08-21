@@ -881,7 +881,8 @@ jrl_legacy_option(
 
 ### Description
   Migrate a legacy option value to a new option name and emit a deprecation warning.
-  If the old option is defined, its value is migrated to the new option.
+  If the old option is defined, its value is migrated to the new option and the old cache
+  entry is removed, so the migration happens only once.
   The NEW_OPTION must already exist in the cache (created via jrl_option or option()).
   The help text is automatically retrieved from the NEW_OPTION cache property.
 
@@ -914,10 +915,17 @@ jrl_option(
 
 
 ### Description
-  Declare a cache BOOL option with optional conditional availability and legacy name migration.
-  When `CONDITION` evaluates to false, the option is forced to the `FALLBACK` value (default OFF) with FORCE and hidden.
+  Declare a cache BOOL (all CMake options are booleans) option, with an optional condition and an optional legacy name.
+  When `CONDITION` is false, the option is forced to the `FALLBACK` value and hidden.
+  When `CONDITION` becomes true again on a reconfigure, the option is shown again and
+  gets back the value the user asked for, or `<default_value>` if they never set one.
   When `LEGACY_NAME` is set, its value is migrated to `<name>` and a deprecation
   warning is emitted.
+
+  Like CMake `option()` with policy `CMP0077`, a normal variable of the same name takes
+  precedence without creating a cache entry, allowing a parent project to set options
+  before `add_subdirectory()` or `FetchContent`. If `CONDITION` evaluates to false, the
+  fallback value is still enforced.
 
 
 ### Arguments
@@ -925,8 +933,9 @@ jrl_option(
 * `help_text`: The cache entry help string.
 * `default_value`: The default value (ON/OFF).
 * `CONDITION`: CMake condition string to evaluate (optional). If false, the option will be forced to FALLBACK value.
-* `FALLBACK`: Value to force when CONDITION is false (optional).
-* `LEGACY_NAME`: Deprecated option name to migrate (optional).
+    A semicolon-separated list is also accepted, in which case every element must be true, as in `cmake_dependent_option()`.
+* `FALLBACK`: Value to force when CONDITION is false (required when CONDITION is given).
+* `LEGACY_NAME`: Deprecated option name to migrate (optional). It is an alias for `<name>`, so it goes through `CONDITION` as well.
 
 
 ### Example
@@ -940,6 +949,12 @@ jrl_option(
     FALLBACK OFF
     LEGACY_NAME BUILD_PYTHON_BINDINGS
 )
+```
+
+`BUILD_PYTHON` follows its condition from one configure to the next:
+```bash
+cmake -B build -DBUILD_SHARED_LIBS=OFF # BUILD_PYTHON is forced to OFF and hidden
+cmake build -DBUILD_SHARED_LIBS=ON     # BUILD_PYTHON is ON and visible again
 ```
 # `jrl_generate_options_markdown_summary`
 
@@ -1127,6 +1142,8 @@ jrl_python_generate_init_py(
 ```cpp
 jrl_check_python_module(
     <module_name>
+    [<version>|<version_range>]
+    [EXACT]
     [REQUIRED]
     [QUIET]
 )
@@ -1141,9 +1158,21 @@ jrl_check_python_module(
   falling back to importlib.metadata.version(<module_name>) otherwise.
   Displays messages based on REQUIRED and QUIET options.
 
+  An optional version constraint may be given as the first argument, with the
+  same syntax as find_package():
+    * `<version>`               : the module version must be >= <version>
+    * `<min>...<max>`           : the module version must be >= <min> and <= <max>
+    * `<min>...<<max>`          : the module version must be >= <min> and < <max>
+    * `<version> EXACT`         : the module version must match the components given
+  A module whose version does not satisfy the constraint (or whose version cannot
+  be determined) is reported as not found. Only the leading numeric components are
+  compared, so Python suffixes such as `.post1`, `rc1` or `.dev0` are ignored.
+
 
 ### Arguments
 * `module_name`: The python module name.
+* `version`: Optional version or version range the module must satisfy.
+* `EXACT`: If set, request an exact version match. Requires a version, not allowed with a range.
 * `REQUIRED`: If set, the package is required.
 * `QUIET`: If set, do not print messages.
 
@@ -1151,6 +1180,8 @@ jrl_check_python_module(
 ### Example
 ```cmake
 jrl_check_python_module(numpy REQUIRED)
+jrl_check_python_module(typing_extensions 4.5 REQUIRED)
+jrl_check_python_module(numpy 1.21...<3 REQUIRED)
 ```
 # `jrl_python_relative_site_packages`
 
