@@ -1,3 +1,26 @@
+## jrl_cmakemodules (humble) - 2.3.0-2
+
+The packages in the `jrl_cmakemodules` repository were released into the `humble` distro by running `/nix/store/y006lzx6pw7dbbh7vvzgbd8mxnfcxy2i-python3.14-bloom-0.14.4/bin/bloom-release -r humble jrl_cmakemodules` on `Fri, 06 Nov 2026 20:56:58 -0000`
+
+The `jrl_cmakemodules` package was released.
+
+Version of package(s) in repository `jrl_cmakemodules`:
+
+- upstream repository: https://github.com/jrl-umi3218/jrl-cmakemodules
+- release repository: https://github.com/ros2-gbp/jrl_cmakemodules-release.git
+- rosdistro version: `2.3.0-1`
+- old version: `2.3.0-1`
+- new version: `2.3.0-2`
+
+Versions of tools used:
+
+- bloom version: `0.14.4`
+- catkin_pkg version: `1.1.1`
+- rosdep version: `0.25.1`
+- rosdistro version: `1.0.1`
+- vcstools version: `0.1.42`
+
+
 ## jrl_cmakemodules (lyrical) - 2.3.0-1
 
 The packages in the `jrl_cmakemodules` repository were released into the `lyrical` distro by running `/nix/store/f47hmxl2kpyiw632j430f6g3marx0yn9-python3.14-bloom-0.14.3/bin/bloom-release -r lyrical -y jrl_cmakemodules` on `Fri, 21 Aug 2026 16:21:55 -0000`
