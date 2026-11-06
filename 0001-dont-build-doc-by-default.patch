@@ -1,4 +1,4 @@
-From 4281f0ad853f03dcc79c35030714dbe907462deb Mon Sep 17 00:00:00 2001
+From c4932471c8cd99a52a6111494c8f51d048408859 Mon Sep 17 00:00:00 2001
 From: Guilhem Saurel <guilhem.saurel@laas.fr>
 Date: Thu, 6 Nov 2025 16:50:49 +0100
 Subject: [PATCH] dont build doc by default
@@ -22,5 +22,5 @@ index fb0a46abc6..08b22cd30a 100644
    INSTALL_DOCUMENTATION
    "Install the documentation."
 -- 
-2.55.0
+2.56.0
 
