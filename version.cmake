@@ -126,8 +126,7 @@ function(_COMPUTE_VERSION_FROM_ROS_PACKAGE_XML_FILE)
   if(EXISTS ${PROJECT_SOURCE_DIR}/package.xml)
     file(READ "${PROJECT_SOURCE_DIR}/package.xml" PACKAGE_XML)
     string(
-      REGEX REPLACE
-      "^.*<version>(.*)</version>.*$"
+      REGEX REPLACE "^.*<version>(.*)</version>.*$"
       "\\1"
       _PACKAGE_XML_VERSION
       ${PACKAGE_XML}
@@ -215,8 +214,7 @@ macro(VERSION_COMPUTE)
 
   if(NOT DEFINED PROJECT_VERSION_COMPUTATION_METHODS)
     list(
-      APPEND
-      PROJECT_VERSION_COMPUTATION_METHODS
+      APPEND PROJECT_VERSION_COMPUTATION_METHODS
       "ROS_PACKAGE_XML_FILE"
       "DOT_VERSION_FILE"
       "GIT_DESCRIBE"
