@@ -1,0 +1,236 @@
+From d3972c491f5777156786328c880ecb7c86e721e3 Mon Sep 17 00:00:00 2001
+From: Guilhem Saurel <guilhem.saurel@laas.fr>
+Date: Fri, 7 Nov 2025 14:27:42 +0100
+Subject: [PATCH 1/2] Rebase from 'release/humble/jrl_cmakemodules'
+
+---
+ CMakeLists.txt           | 12 +++++++
+ debian/changelog.em      |  7 ----
+ debian/compat.em         |  1 -
+ debian/control.em        | 14 --------
+ debian/copyright.em      | 11 -------
+ debian/gbp.conf.em       |  3 --
+ debian/rules.em          | 69 ----------------------------------------
+ debian/source/format.em  |  1 -
+ debian/source/options.em |  6 ----
+ git-archive-all.py       |  2 +-
+ package.xml              |  2 +-
+ 11 files changed, 14 insertions(+), 114 deletions(-)
+ delete mode 100644 debian/changelog.em
+ delete mode 100644 debian/compat.em
+ delete mode 100644 debian/control.em
+ delete mode 100644 debian/copyright.em
+ delete mode 100644 debian/gbp.conf.em
+ delete mode 100755 debian/rules.em
+ delete mode 100644 debian/source/format.em
+ delete mode 100644 debian/source/options.em
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c566d6a4eb..05fa6f7364 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -138,6 +138,18 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+     DESTINATION ${INSTALL_DIR}
+   )
+ 
++  # This package is architecture independent. Dont allow ROS to think otherwise
++  # and break everything by installing in lib/x86_64-linux-gnu, which does prevent
++  # find_package(jrl-cmakemodules) to work before a call to project().
++  # share is fine.
++  set(
++    CMAKE_INSTALL_LIBDIR
++    "${CMAKE_INSTALL_DATAROOTDIR}"
++    CACHE PATH
++    "Install exports in share, not lib"
++    FORCE
++  )
++
+   install(TARGETS ${PROJECT_NAME} EXPORT ${TARGETS_EXPORT_NAME})
+ 
+   SETUP_PROJECT_PACKAGE_FINALIZE()
+diff --git a/debian/changelog.em b/debian/changelog.em
+deleted file mode 100644
+index 3585909062..0000000000
+--- a/debian/changelog.em
++++ /dev/null
+@@ -1,7 +0,0 @@
+-@[for change_version, change_date, changelog, main_name, main_email in changelogs]@(Package) (@(change_version)@(DebianInc)@(Distribution)) @(Distribution); urgency=high
+-
+-@(changelog)
+-
+- -- @(main_name) <@(main_email)>  @(change_date)
+-
+-@[end for]
+diff --git a/debian/compat.em b/debian/compat.em
+deleted file mode 100644
+index 7a87216d3c..0000000000
+--- a/debian/compat.em
++++ /dev/null
+@@ -1 +0,0 @@
+-@(debhelper_version)
+diff --git a/debian/control.em b/debian/control.em
+deleted file mode 100644
+index 4459a97a70..0000000000
+--- a/debian/control.em
++++ /dev/null
+@@ -1,14 +0,0 @@
+-Source: @(Package)
+-Section: misc
+-Priority: optional
+-Maintainer: @(Maintainer)
+-Build-Depends: debhelper (>= @(debhelper_version).0.0), @(', '.join(BuildDepends))
+-Homepage: @(Homepage)
+-Standards-Version: 3.9.2
+-
+-Package: @(Package)
+-Architecture: @(Architecture)
+-Depends: ${shlibs:Depends}, ${misc:Depends}, @(', '.join(Depends))
+-@[if Conflicts]Conflicts: @(', '.join(Conflicts))@\n@[end if]@
+-@[if Replaces]Replaces: @(', '.join(Replaces))@\n@[end if]@
+-Description: @(Description)
+diff --git a/debian/copyright.em b/debian/copyright.em
+deleted file mode 100644
+index bc82fd5da0..0000000000
+--- a/debian/copyright.em
++++ /dev/null
+@@ -1,11 +0,0 @@
+-Format: Bloom subset of https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+-Upstream-Name: @(Name)
+-@[if BugTracker]Upstream-Contact: @(BugTracker)@\n@[end if]@
+-@[if Source]Source: @(Source)@\n@[end if]@
+-@[for License, Text in Licenses]@
+-
+-Files: See file headers in repository for details
+-Copyright: See package copyright in source code for details
+-License: @(License)
+- @(Text)
+-@[end for]@
+diff --git a/debian/gbp.conf.em b/debian/gbp.conf.em
+deleted file mode 100644
+index ad24a164d0..0000000000
+--- a/debian/gbp.conf.em
++++ /dev/null
+@@ -1,3 +0,0 @@
+-[git-buildpackage]
+-upstream-tag=@(release_tag)
+-upstream-tree=tag
+diff --git a/debian/rules.em b/debian/rules.em
+deleted file mode 100755
+index 284a07142d..0000000000
+--- a/debian/rules.em
++++ /dev/null
+@@ -1,69 +0,0 @@
+-#!/usr/bin/make -f
+-# -*- makefile -*-
+-# Sample debian/rules that uses debhelper.
+-# This file was originally written by Joey Hess and Craig Small.
+-# As a special exception, when this file is copied by dh-make into a
+-# dh-make output file, you may use that output file without restriction.
+-# This special exception was added by Craig Small in version 0.37 of dh-make.
+-
+-# Uncomment this to turn on verbose mode.
+-export DH_VERBOSE=1
+-# TODO: remove the LDFLAGS override.  It's here to avoid esoteric problems
+-# of this sort:
+-#  https://code.ros.org/trac/ros/ticket/2977
+-#  https://code.ros.org/trac/ros/ticket/3842
+-export LDFLAGS=
+-export PKG_CONFIG_PATH=@(InstallationPrefix)/lib/pkgconfig
+-# Explicitly enable -DNDEBUG, see:
+-# 	https://github.com/ros-infrastructure/bloom/issues/327
+-export DEB_CXXFLAGS_MAINT_APPEND=-DNDEBUG
+-ifneq ($(filter nocheck,$(DEB_BUILD_OPTIONS)),)
+-	BUILD_TESTING_ARG=-DBUILD_TESTING=OFF
+-endif
+-
+-# Solve shlibdeps errors in REP136 packages that use GNUInstallDirs:
+-export DEB_HOST_MULTIARCH := $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
+-
+-DEB_HOST_GNU_TYPE ?= $(shell dpkg-architecture -qDEB_HOST_GNU_TYPE)
+-
+-%:
+-	dh $@@ -v --buildsystem=cmake --builddirectory=.obj-$(DEB_HOST_GNU_TYPE)
+-
+-override_dh_auto_configure:
+-	# In case we're installing to a non-standard location, look for a setup.sh
+-	# in the install tree and source it.  It will set things like
+-	# CMAKE_PREFIX_PATH, PKG_CONFIG_PATH, and PYTHONPATH.
+-	if [ -f "@(InstallationPrefix)/setup.sh" ]; then . "@(InstallationPrefix)/setup.sh"; fi && \
+-	dh_auto_configure -- \
+-		-DCMAKE_INSTALL_PREFIX="@(InstallationPrefix)" \
+-		-DCMAKE_PREFIX_PATH="@(InstallationPrefix)" \
+-		$(BUILD_TESTING_ARG)
+-
+-override_dh_auto_build:
+-	# In case we're installing to a non-standard location, look for a setup.sh
+-	# in the install tree and source it.  It will set things like
+-	# CMAKE_PREFIX_PATH, PKG_CONFIG_PATH, and PYTHONPATH.
+-	if [ -f "@(InstallationPrefix)/setup.sh" ]; then . "@(InstallationPrefix)/setup.sh"; fi && \
+-	dh_auto_build
+-
+-override_dh_auto_test:
+-	# In case we're installing to a non-standard location, look for a setup.sh
+-	# in the install tree and source it.  It will set things like
+-	# CMAKE_PREFIX_PATH, PKG_CONFIG_PATH, and PYTHONPATH.
+-	echo -- Running tests. Even if one of them fails the build is not canceled.
+-	if [ -f "@(InstallationPrefix)/setup.sh" ]; then . "@(InstallationPrefix)/setup.sh"; fi && \
+-	dh_auto_test || true
+-
+-override_dh_shlibdeps:
+-	# In case we're installing to a non-standard location, look for a setup.sh
+-	# in the install tree and source it.  It will set things like
+-	# CMAKE_PREFIX_PATH, PKG_CONFIG_PATH, and PYTHONPATH.
+-	if [ -f "@(InstallationPrefix)/setup.sh" ]; then . "@(InstallationPrefix)/setup.sh"; fi && \
+-	dh_shlibdeps -l$(CURDIR)/debian/@(Package)/@(InstallationPrefix)/lib/:$(CURDIR)/debian/@(Package)/@(InstallationPrefix)/lib/${DEB_HOST_MULTIARCH}
+-
+-override_dh_auto_install:
+-	# In case we're installing to a non-standard location, look for a setup.sh
+-	# in the install tree and source it.  It will set things like
+-	# CMAKE_PREFIX_PATH, PKG_CONFIG_PATH, and PYTHONPATH.
+-	if [ -f "@(InstallationPrefix)/setup.sh" ]; then . "@(InstallationPrefix)/setup.sh"; fi && \
+-	dh_auto_install
+diff --git a/debian/source/format.em b/debian/source/format.em
+deleted file mode 100644
+index 9666bf4109..0000000000
+--- a/debian/source/format.em
++++ /dev/null
+@@ -1 +0,0 @@
+-3.0 (@(format))
+diff --git a/debian/source/options.em b/debian/source/options.em
+deleted file mode 100644
+index 8c4c78b063..0000000000
+--- a/debian/source/options.em
++++ /dev/null
+@@ -1,6 +0,0 @@
+-@[if format and format == 'quilt']@
+-# Automatically add upstream changes to the quilt overlay.
+-# http://manpages.ubuntu.com/manpages/trusty/man1/dpkg-source.1.html
+-# This supports reusing the orig.tar.gz for debian increments.
+-auto-commit
+-@[end if]
+diff --git a/git-archive-all.py b/git-archive-all.py
+index 4360acebf4..f6f435a308 100755
+--- a/git-archive-all.py
++++ b/git-archive-all.py
+@@ -1,4 +1,4 @@
+-#! /usr/bin/env python
++#! /usr/bin/env python3
+ # This file comes originally from: https://github.com/Kentzo/git-archive-all
+ #
+ # coding=utf-8
+diff --git a/package.xml b/package.xml
+index 4b767bc6c1..7957552cbe 100644
+--- a/package.xml
++++ b/package.xml
+@@ -1,7 +1,7 @@
+ <?xml version="1.0"?>
+ <package format="3">
+   <name>jrl_cmakemodules</name>
+-  <version>1.1.1</version>
++  <version>1.1.2</version>
+   <description>CMake utility toolbox</description>
+   <url type="website">https://github.com/jrl-umi3218/jrl-cmakemodules</url>
+ 
+-- 
+2.56.0
+
