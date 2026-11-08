@@ -28,7 +28,10 @@ option(PYTHON_BINDING_FORCE_PYTHON2 "Use python2 instead of python" OFF)
 option(PYTHON_BINDING_FORCE_PYTHON3 "Use python3 instead of python" OFF)
 set(PYTHON_BINDING_BUILD_PYTHON2_AND_PYTHON3_DEFAULT OFF)
 if(DEFINED PYTHON_DEB_ROOT)
-  set(PYTHON_BINDING_BUILD_PYTHON2_AND_PYTHON3_DEFAULT ON)
+  find_program(DEFAULT_PYTHON2_EXECUTABLE python2)
+  if(DEFAULT_PYTHON2_EXECUTABLE)
+    set(PYTHON_BINDING_BUILD_PYTHON2_AND_PYTHON3_DEFAULT ON)
+  endif()
 endif()
 option(
   PYTHON_BINDING_BUILD_PYTHON2_AND_PYTHON3
@@ -60,7 +63,8 @@ macro(_setup_python_for_cython)
     if(N_PYTHON_BINDING_VERSIONS EQUAL 0)
       list(APPEND PYTHON_BINDING_VERSIONS Python)
       # Recent CMake always favor Python 3 but we really want the system's
-      # default Python in that case
+      # default Python in that case. If a venv is active, python should point to
+      # the venv interpreter and preserve the desired install behavior.
       if(NOT DEFINED Python_EXECUTABLE)
         find_program(DEFAULT_PYTHON_EXECUTABLE python)
         if(DEFAULT_PYTHON_EXECUTABLE)
@@ -70,7 +74,7 @@ macro(_setup_python_for_cython)
     endif()
     foreach(PYTHON_VERSION ${PYTHON_BINDING_VERSIONS})
       # CMake favors the most recent version it can find on the system but we
-      # really mean to pick the default "python3" if availble
+      # really mean to pick the default "python3" if available.
       if(PYTHON_VERSION STREQUAL "Python3" AND NOT DEFINED Python3_EXECUTABLE)
         find_program(DEFAULT_PYTHON3_EXECUTABLE python3)
         if(DEFAULT_PYTHON3_EXECUTABLE)
@@ -146,11 +150,87 @@ macro(_pip_has_install_system PYTHON OUT)
   endif()
 endmacro()
 
+# Compute the install destination for MAKE_CYTHON_BINDINGS. Preserve the
+# previous system/debian layout but use the interpreter's site-packages directly
+# when the selected interpreter is a virtual environment.
+function(_get_cython_python_install_destination python_executable output_var)
+  if(DEFINED PYTHON_DEB_ROOT)
+    execute_process(
+      COMMAND
+        ${python_executable} -c
+        "from distutils import sysconfig; print(sysconfig.get_python_lib(plat_specific = True, standard_lib = False))"
+      RESULT_VARIABLE python_install_destination_found
+      OUTPUT_VARIABLE python_install_destination
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+  else()
+    execute_process(
+      COMMAND
+        ${python_executable} -c
+        "import sys; print(int(hasattr(sys, 'real_prefix') or getattr(sys, 'base_prefix', sys.prefix) != sys.prefix))"
+      RESULT_VARIABLE python_is_venv_found
+      OUTPUT_VARIABLE python_is_venv
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(
+      "${python_is_venv_found}" STREQUAL "0"
+      AND "${python_is_venv}" STREQUAL "1"
+    )
+      execute_process(
+        COMMAND
+          ${python_executable} -c
+          "import sysconfig; print(sysconfig.get_path('purelib'))"
+        RESULT_VARIABLE python_install_destination_found
+        OUTPUT_VARIABLE python_install_destination
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+      )
+    else()
+      execute_process(
+        COMMAND
+          ${python_executable} -c
+          "from distutils import sysconfig; print(sysconfig.get_python_lib(prefix = '${CMAKE_INSTALL_PREFIX}', plat_specific = True))"
+        RESULT_VARIABLE python_install_destination_found
+        OUTPUT_VARIABLE python_install_destination
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+      )
+      # Debian/Ubuntu has a specific problem here See
+      # https://github.com/mesonbuild/meson/issues/8739 for an overview of the
+      # problem
+      if(EXISTS /etc/debian_version)
+        execute_process(
+          COMMAND
+            ${python_executable} -c
+            "import sys; print(\"python{}.{}\".format(sys.version_info.major, sys.version_info.minor));"
+          OUTPUT_VARIABLE python_version
+          OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        string(
+          REPLACE "python3/"
+          "${python_version}/"
+          python_install_destination
+          "${python_install_destination}"
+        )
+      endif()
+    endif()
+  endif()
+
+  if(WIN32)
+    file(
+      TO_CMAKE_PATH
+      "${python_install_destination}"
+      python_install_destination
+    )
+  endif()
+
+  set(${output_var} "${python_install_destination}" PARENT_SCOPE)
+endfunction()
+
 # Copy bindings source to build directories and create appropriate target for
 # building, installing and testing
 macro(
   _ADD_CYTHON_BINDINGS_TARGETS
   PYTHON
+  PYTHON_EXECUTABLE
   PACKAGE
   SOURCES
   GENERATE_SOURCES
@@ -181,8 +261,7 @@ macro(
     endforeach()
   endif()
   file(
-    GENERATE OUTPUT
-    "${SETUP_LOCATION}/setup.py"
+    GENERATE OUTPUT "${SETUP_LOCATION}/setup.py"
     INPUT "${CMAKE_CURRENT_BINARY_DIR}/${PACKAGE}/setup.in.py"
   )
   # Target to build the bindings
@@ -191,8 +270,8 @@ macro(
     ${TARGET_NAME}
     ALL
     COMMAND
-      ${CMAKE_COMMAND} -E chdir "${SETUP_LOCATION}" ${PYTHON} setup.py build_ext
-      --inplace
+      ${CMAKE_COMMAND} -E chdir "${SETUP_LOCATION}" ${PYTHON_EXECUTABLE}
+      setup.py build_ext --inplace
     COMMENT "Generating local ${PACKAGE} ${PYTHON} bindings"
     DEPENDS ${SOURCES} ${GENERATE_SOURCES}
     SOURCES ${SOURCES} ${GENERATE_SOURCES}
@@ -202,8 +281,7 @@ macro(
   # Copy sources
   foreach(F ${GENERATE_SOURCES})
     file(
-      GENERATE OUTPUT
-      "${SETUP_LOCATION}/${F}"
+      GENERATE OUTPUT "${SETUP_LOCATION}/${F}"
       INPUT "${CMAKE_CURRENT_BINARY_DIR}/${PACKAGE}/configured/${F}"
     )
   endforeach()
@@ -239,8 +317,8 @@ macro(
   add_custom_target(
     force-${TARGET_NAME}
     COMMAND
-      ${CMAKE_COMMAND} -E chdir "${SETUP_LOCATION}" ${PYTHON} setup.py build_ext
-      --inplace --force
+      ${CMAKE_COMMAND} -E chdir "${SETUP_LOCATION}" ${PYTHON_EXECUTABLE}
+      setup.py build_ext --inplace --force
     COMMENT "Generating local ${PACKAGE} ${PYTHON} bindings (forced)"
   )
   set_target_properties(force-${TARGET_NAME} PROPERTIES FOLDER "bindings")
@@ -269,7 +347,8 @@ macro(
         COMMAND
           ${CMAKE_COMMAND} -E env "${ENV_VAR}=${EXTRA_LD_PATH}$ENV{${ENV_VAR}}"
           ${CMAKE_COMMAND} -E env "PYTHONPATH=.${PATH_SEP}$ENV{PYTHONPATH}"
-          ${CMAKE_COMMAND} -E chdir "${SETUP_LOCATION}" ${PYTHON} -m pytest
+          ${CMAKE_COMMAND} -E chdir "${SETUP_LOCATION}" ${PYTHON_EXECUTABLE} -m
+          pytest
       )
     endif()
   endif()
@@ -278,8 +357,8 @@ macro(
     add_custom_target(
       install-${TARGET_NAME}
       COMMAND
-        ${CMAKE_COMMAND} -E chdir "${SETUP_LOCATION}" ${PYTHON} setup.py install
-        --root=${PYTHON_DEB_ROOT} --install-layout=deb
+        ${CMAKE_COMMAND} -E chdir "${SETUP_LOCATION}" ${PYTHON_EXECUTABLE}
+        setup.py install --root=${PYTHON_DEB_ROOT} --install-layout=deb
       COMMENT "Install ${PACKAGE} ${PYTHON} bindings (Debian layout)"
     )
   else()
@@ -288,10 +367,10 @@ macro(
       set(PIP_EXTRA_OPTIONS "--user")
     endif()
     if(DEFINED PIP_INSTALL_PREFIX)
-      _pip_has_install_system(${PYTHON} PIP_HAS_INSTALL_SYSTEM)
+      _pip_has_install_system(${PYTHON_EXECUTABLE} PIP_HAS_INSTALL_SYSTEM)
       execute_process(
         COMMAND
-          ${PYTHON} -c
+          ${PYTHON_EXECUTABLE} -c
           "import sys; print(\"python{}.{}\".format(sys.version_info.major, sys.version_info.minor));"
         OUTPUT_VARIABLE PYTHON_VERSION
         OUTPUT_STRIP_TRAILING_WHITESPACE
@@ -308,16 +387,16 @@ macro(
     add_custom_target(
       install-${TARGET_NAME}
       COMMAND
-        ${CMAKE_COMMAND} -E chdir "${SETUP_LOCATION}" ${PYTHON} -m pip install .
-        ${PIP_EXTRA_OPTIONS} --upgrade
+        ${CMAKE_COMMAND} -E chdir "${SETUP_LOCATION}" ${PYTHON_EXECUTABLE} -m
+        pip install . ${PIP_EXTRA_OPTIONS} --upgrade
       COMMENT "Install ${PACKAGE} ${PYTHON} bindings"
     )
     set_target_properties(install-${TARGET_NAME} PROPERTIES FOLDER "bindings")
     add_custom_target(
       uninstall-${TARGET_NAME}
       COMMAND
-        ${CMAKE_COMMAND} -E chdir "${SETUP_LOCATION}" ${PYTHON} -m pip uninstall
-        -y ${PACKAGE}
+        ${CMAKE_COMMAND} -E chdir "${SETUP_LOCATION}" ${PYTHON_EXECUTABLE} -m
+        pip uninstall -y ${PACKAGE}
       COMMENT "Removing ${PACKAGE} ${PYTHON} bindings"
     )
     set_target_properties(uninstall-${TARGET_NAME} PROPERTIES FOLDER "bindings")
@@ -422,73 +501,60 @@ macro(ADD_CYTHON_BINDINGS PACKAGE)
     if(${IS_INTERFACE})
       _CYTHON_DUMMY_TARGET(${TGT})
       list(
-        APPEND
-        CYTHON_BINDINGS_COMPILE_DEFINITIONS
+        APPEND CYTHON_BINDINGS_COMPILE_DEFINITIONS
         "$<TARGET_PROPERTY:_cython_dummy_${TGT},COMPILE_DEFINITIONS>"
       )
       list(
-        APPEND
-        CYTHON_BINDINGS_COMPILE_DEFINITIONS
+        APPEND CYTHON_BINDINGS_COMPILE_DEFINITIONS
         "$<TARGET_PROPERTY:_cython_dummy_${TGT},INTERFACE_COMPILE_DEFINITIONS>"
       )
       list(
-        APPEND
-        CYTHON_BINDINGS_CXX_STANDARD
+        APPEND CYTHON_BINDINGS_CXX_STANDARD
         "$<TARGET_PROPERTY:_cython_dummy_${TGT},CXX_STANDARD>"
       )
       list(
-        APPEND
-        CYTHON_BINDINGS_INCLUDE_DIRECTORIES
+        APPEND CYTHON_BINDINGS_INCLUDE_DIRECTORIES
         "$<TARGET_PROPERTY:_cython_dummy_${TGT},INCLUDE_DIRECTORIES>"
       )
       list(
-        APPEND
-        CYTHON_BINDINGS_INCLUDE_DIRECTORIES
+        APPEND CYTHON_BINDINGS_INCLUDE_DIRECTORIES
         "$<TARGET_PROPERTY:_cython_dummy_${TGT},INTERFACE_INCLUDE_DIRECTORIES>"
       )
       list(
-        APPEND
-        CYTHON_BINDINGS_LINK_FLAGS
+        APPEND CYTHON_BINDINGS_LINK_FLAGS
         "$<TARGET_PROPERTY:_cython_dummy_${TGT},LINK_FLAGS>"
       )
     else()
       _is_static_library(${TGT} IS_STATIC)
       list(
-        APPEND
-        CYTHON_BINDINGS_COMPILE_DEFINITIONS
+        APPEND CYTHON_BINDINGS_COMPILE_DEFINITIONS
         "$<TARGET_PROPERTY:${TGT},COMPILE_DEFINITIONS>"
       )
       list(
-        APPEND
-        CYTHON_BINDINGS_COMPILE_DEFINITIONS
+        APPEND CYTHON_BINDINGS_COMPILE_DEFINITIONS
         "$<TARGET_PROPERTY:${TGT},INTERFACE_COMPILE_DEFINITIONS>"
       )
       list(
-        APPEND
-        CYTHON_BINDINGS_CXX_STANDARD
+        APPEND CYTHON_BINDINGS_CXX_STANDARD
         "$<TARGET_PROPERTY:${TGT},CXX_STANDARD>"
       )
       list(
-        APPEND
-        CYTHON_BINDINGS_INCLUDE_DIRECTORIES
+        APPEND CYTHON_BINDINGS_INCLUDE_DIRECTORIES
         "$<TARGET_PROPERTY:${TGT},INCLUDE_DIRECTORIES>"
       )
       list(
-        APPEND
-        CYTHON_BINDINGS_INCLUDE_DIRECTORIES
+        APPEND CYTHON_BINDINGS_INCLUDE_DIRECTORIES
         "$<TARGET_PROPERTY:${TGT},INTERFACE_INCLUDE_DIRECTORIES>"
       )
       list(
-        APPEND
-        CYTHON_BINDINGS_LINK_FLAGS
+        APPEND CYTHON_BINDINGS_LINK_FLAGS
         "$<TARGET_PROPERTY:${TGT},LINK_FLAGS>"
       )
       list(APPEND CYTHON_BINDINGS_LIBRARIES "$<TARGET_LINKER_FILE:${TGT}>")
       list(APPEND CYTHON_BINDINGS_TARGET_FILES "$<TARGET_LINKER_FILE:${TGT}>")
       if(${IS_STATIC})
         list(
-          APPEND
-          CYTHON_BINDINGS_STATIC_LIBRARIES
+          APPEND CYTHON_BINDINGS_STATIC_LIBRARIES
           "$<TARGET_LINKER_FILE:${TGT}>"
         )
       endif()
@@ -507,6 +573,7 @@ macro(ADD_CYTHON_BINDINGS PACKAGE)
   if(${PYTHON_BINDING_BUILD_PYTHON2_AND_PYTHON3})
     _ADD_CYTHON_BINDINGS_TARGETS(
       "python2"
+      ${Python2_EXECUTABLE}
       ${PACKAGE}
       "${CYTHON_BINDINGS_SOURCES}"
       "${CYTHON_BINDINGS_GENERATE_SOURCES}"
@@ -515,6 +582,7 @@ macro(ADD_CYTHON_BINDINGS PACKAGE)
     )
     _ADD_CYTHON_BINDINGS_TARGETS(
       "python3"
+      ${Python3_EXECUTABLE}
       ${PACKAGE}
       "${CYTHON_BINDINGS_SOURCES}"
       "${CYTHON_BINDINGS_GENERATE_SOURCES}"
@@ -524,6 +592,7 @@ macro(ADD_CYTHON_BINDINGS PACKAGE)
   elseif(${PYTHON_BINDING_FORCE_PYTHON3})
     _ADD_CYTHON_BINDINGS_TARGETS(
       "python3"
+      ${Python3_EXECUTABLE}
       ${PACKAGE}
       "${CYTHON_BINDINGS_SOURCES}"
       "${CYTHON_BINDINGS_GENERATE_SOURCES}"
@@ -533,6 +602,7 @@ macro(ADD_CYTHON_BINDINGS PACKAGE)
   elseif(${PYTHON_BINDING_FORCE_PYTHON2})
     _ADD_CYTHON_BINDINGS_TARGETS(
       "python2"
+      ${Python2_EXECUTABLE}
       ${PACKAGE}
       "${CYTHON_BINDINGS_SOURCES}"
       "${CYTHON_BINDINGS_GENERATE_SOURCES}"
@@ -542,6 +612,7 @@ macro(ADD_CYTHON_BINDINGS PACKAGE)
   else()
     _ADD_CYTHON_BINDINGS_TARGETS(
       "python"
+      ${Python_EXECUTABLE}
       ${PACKAGE}
       "${CYTHON_BINDINGS_SOURCES}"
       "${CYTHON_BINDINGS_GENERATE_SOURCES}"
@@ -754,64 +825,27 @@ function(MAKE_CYTHON_BINDINGS PACKAGE)
       PACKAGE_OUTPUT_DIRECTORY
       ${CMAKE_CURRENT_BINARY_DIR}/${PYTHON}/$<CONFIG>/${PACKAGE}
     )
-    if(DEFINED PYTHON_DEB_ROOT)
-      execute_process(
-        COMMAND
-          ${${PYTHON}_EXECUTABLE} -c
-          "from distutils import sysconfig; print(sysconfig.get_python_lib(plat_specific = True, standard_lib = False))"
-        RESULT_VARIABLE PYTHON_INSTALL_DESTINATION_FOUND
-        OUTPUT_VARIABLE PYTHON_INSTALL_DESTINATION
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-      )
-    else()
-      execute_process(
-        COMMAND
-          ${${PYTHON}_EXECUTABLE} -c
-          "from distutils import sysconfig; print(sysconfig.get_python_lib(prefix = '${CMAKE_INSTALL_PREFIX}', plat_specific = True))"
-        RESULT_VARIABLE PYTHON_INSTALL_DESTINATION_FOUND
-        OUTPUT_VARIABLE PYTHON_INSTALL_DESTINATION
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-      )
-      # Debian/Ubuntu has a specific problem here See
-      # https://github.com/mesonbuild/meson/issues/8739 for an overview of the
-      # problem
-      if(EXISTS /etc/debian_version)
-        execute_process(
-          COMMAND
-            ${${PYTHON}_EXECUTABLE} -c
-            "import sys; print(\"python{}.{}\".format(sys.version_info.major, sys.version_info.minor));"
-          OUTPUT_VARIABLE PYTHON_VERSION
-          OUTPUT_STRIP_TRAILING_WHITESPACE
-        )
-        string(
-          REPLACE
-          "python3/"
-          "${PYTHON_VERSION}/"
-          PYTHON_INSTALL_DESTINATION
-          "${PYTHON_INSTALL_DESTINATION}"
-        )
-      endif()
-    endif()
+    _get_cython_python_install_destination(
+      ${${PYTHON}_EXECUTABLE}
+      PYTHON_INSTALL_DESTINATION
+    )
     foreach(F ${CYTHON_BINDINGS_GENERATE_SOURCES})
       configure_file(${F} ${CMAKE_CURRENT_BINARY_DIR}/${PYTHON}/cmake/${F})
       file(
-        GENERATE OUTPUT
-        ${PACKAGE_OUTPUT_DIRECTORY}/${F}
+        GENERATE OUTPUT ${PACKAGE_OUTPUT_DIRECTORY}/${F}
         INPUT ${CMAKE_CURRENT_BINARY_DIR}/${PYTHON}/cmake/${F}
       )
     endforeach()
     foreach(F ${CYTHON_BINDINGS_EXPORT_SOURCES})
       file(
-        GENERATE OUTPUT
-        ${PACKAGE_OUTPUT_DIRECTORY}/${F}
+        GENERATE OUTPUT ${PACKAGE_OUTPUT_DIRECTORY}/${F}
         INPUT ${CMAKE_CURRENT_SOURCE_DIR}/${F}
       )
     endforeach()
     foreach(F ${CYTHON_BINDINGS_PRIVATE_SOURCES})
       if(${F} MATCHES "^tests/")
         file(
-          GENERATE OUTPUT
-          ${PACKAGE_OUTPUT_DIRECTORY}/${F}
+          GENERATE OUTPUT ${PACKAGE_OUTPUT_DIRECTORY}/${F}
           INPUT ${CMAKE_CURRENT_SOURCE_DIR}/${F}
         )
       endif()
@@ -897,11 +931,11 @@ function(MAKE_CYTHON_BINDINGS PACKAGE)
       )
       set(TARGET_NAME ${LIB_NAME}_${PYTHON})
       if(${PYTHON} STREQUAL "Python")
-        Python_add_library(${TARGET_NAME} MODULE ${CPP_OUT})
+        python_add_library(${TARGET_NAME} MODULE ${CPP_OUT})
       elseif(${PYTHON} STREQUAL "Python2")
-        Python2_add_library(${TARGET_NAME} MODULE ${CPP_OUT})
+        python2_add_library(${TARGET_NAME} MODULE ${CPP_OUT})
       elseif(${PYTHON} STREQUAL "Python3")
-        Python3_add_library(${TARGET_NAME} MODULE ${CPP_OUT})
+        python3_add_library(${TARGET_NAME} MODULE ${CPP_OUT})
       else()
         message(FATAL_ERROR "Unknown Python value: ${PYTHON}")
       endif()
